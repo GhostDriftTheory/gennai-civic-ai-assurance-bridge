@@ -1,0 +1,897 @@
+{
+  "schema": "civic-lifecycle-cases/1.0",
+  "metadata": {
+    "synthetic_only": true,
+    "stage": "offline-mock",
+    "note": "全て架空。時刻は模擬カウンタ。実API・実住民情報・機密資料を含まない。"
+  },
+  "reference": {
+    "schema": "civic-lifecycle-reference/1.0",
+    "scope": "local-business",
+    "clock": 1,
+    "certificate_ticks": 3,
+    "actors": {
+      "staff": [
+        "use",
+        "derive",
+        "copy",
+        "start_copy"
+      ],
+      "reviewer": [
+        "approve",
+        "amend"
+      ],
+      "operator": [
+        "freeze",
+        "close",
+        "settle",
+        "tick",
+        "inventory_drop",
+        "inventory_restore",
+        "route_restore",
+        "route_unknown",
+        "remote_copy",
+        "mark_unknown"
+      ]
+    },
+    "origins": [
+      "O-A",
+      "O-B"
+    ],
+    "sources": [
+      {
+        "id": "A",
+        "kind": "source",
+        "origins": [
+          "O-A"
+        ],
+        "text": "【架空相談A】子育てと就労の両立について、利用できる相談窓口を知りたい。年代は30代、世帯区分は子育て世帯。",
+        "conditions": [
+          {
+            "origin": "O-A",
+            "kind": "purpose",
+            "value": 1
+          },
+          {
+            "origin": "O-A",
+            "kind": "deadline",
+            "value": 10
+          },
+          {
+            "origin": "O-A",
+            "kind": "audit",
+            "value": 1
+          }
+        ]
+      },
+      {
+        "id": "B",
+        "kind": "source",
+        "origins": [
+          "O-B"
+        ],
+        "text": "【架空業務資料B】子育て相談と就労支援の窓口へ案内する。資料と派生文は庁内の職員確認用に限る。",
+        "conditions": [
+          {
+            "origin": "O-B",
+            "kind": "recipient",
+            "value": 1
+          },
+          {
+            "origin": "O-B",
+            "kind": "audit",
+            "value": 1
+          }
+        ]
+      }
+    ],
+    "labels": {
+      "purpose": {
+        "1": "相談案内のみ",
+        "3": "相談案内・承認済み二次利用"
+      },
+      "recipient": {
+        "1": "内部利用のみ"
+      },
+      "deadline": {
+        "10": "模擬時刻10未満"
+      },
+      "audit": {
+        "1": "監査義務を保持"
+      }
+    },
+    "grant_scope": {
+      "origin": "O-A",
+      "kind": "purpose",
+      "from": 1,
+      "to": 3,
+      "purpose": "secondary",
+      "recipient": "internal",
+      "ttl": 3
+    },
+    "capabilities": [
+      "read"
+    ],
+    "provider": {
+      "mode": "mock",
+      "network": false,
+      "model": "fixed-summary-v1"
+    },
+    "retention": "監査用記録・合成入力は保持。証明対象は管理ゲート経由の業務利用のみ。"
+  },
+  "scenarios": [
+    {
+      "key": "inherit",
+      "label": "生成後も条件を引き継ぐ",
+      "summary": "要約から名前や引用が消えても、入力由来の利用条件は消えません。",
+      "commands": [
+        {
+          "op": "derive",
+          "actor": "staff",
+          "parents": [
+            "A",
+            "B"
+          ],
+          "target": "S",
+          "support": "unknown",
+          "mode": "normal"
+        },
+        {
+          "op": "use",
+          "actor": "staff",
+          "target": "S",
+          "purpose": "consultation",
+          "recipient": "internal"
+        },
+        {
+          "op": "use",
+          "actor": "staff",
+          "target": "S",
+          "purpose": "secondary",
+          "recipient": "internal"
+        },
+        {
+          "op": "use",
+          "actor": "staff",
+          "target": "S",
+          "purpose": "consultation",
+          "recipient": "external"
+        }
+      ],
+      "expected": [
+        "PASS",
+        "PASS",
+        "REJECT",
+        "REJECT"
+      ]
+    },
+    {
+      "key": "partial_change",
+      "label": "一つの条件だけを変更",
+      "summary": "二次利用を認めても、別起源の内部利用制限と監査義務は保持します。",
+      "commands": [
+        {
+          "op": "derive",
+          "actor": "staff",
+          "parents": [
+            "A",
+            "B"
+          ],
+          "target": "S",
+          "support": "unknown",
+          "mode": "normal"
+        },
+        {
+          "op": "approve",
+          "actor": "reviewer",
+          "target": "S",
+          "approval": "G1"
+        },
+        {
+          "op": "amend",
+          "actor": "reviewer",
+          "target": "S",
+          "approval": "G1"
+        },
+        {
+          "op": "use",
+          "actor": "staff",
+          "target": "S",
+          "purpose": "secondary",
+          "recipient": "internal"
+        },
+        {
+          "op": "use",
+          "actor": "staff",
+          "target": "S",
+          "purpose": "secondary",
+          "recipient": "external"
+        },
+        {
+          "op": "use",
+          "actor": "staff",
+          "target": "A",
+          "purpose": "secondary",
+          "recipient": "internal"
+        }
+      ],
+      "expected": [
+        "PASS",
+        "PASS",
+        "PASS",
+        "PASS",
+        "REJECT",
+        "REJECT"
+      ]
+    },
+    {
+      "key": "missing_proof",
+      "label": "証拠がなければ緩和しない",
+      "summary": "変更証拠の不足を、条件解除や利用許可に読み替えません。",
+      "commands": [
+        {
+          "op": "derive",
+          "actor": "staff",
+          "parents": [
+            "A",
+            "B"
+          ],
+          "target": "S",
+          "support": "unknown",
+          "mode": "normal"
+        },
+        {
+          "op": "amend",
+          "actor": "reviewer",
+          "target": "S",
+          "approval": "MISSING"
+        },
+        {
+          "op": "use",
+          "actor": "staff",
+          "target": "S",
+          "purpose": "secondary",
+          "recipient": "internal"
+        },
+        {
+          "op": "use",
+          "actor": "staff",
+          "target": "S",
+          "purpose": "consultation",
+          "recipient": "internal"
+        }
+      ],
+      "expected": [
+        "PASS",
+        "HOLD",
+        "REJECT",
+        "PASS"
+      ]
+    },
+    {
+      "key": "binding",
+      "label": "別の出力に証拠を流用しない",
+      "summary": "承認対象と異なるコピーには変更証拠を適用しません。",
+      "commands": [
+        {
+          "op": "derive",
+          "actor": "staff",
+          "parents": [
+            "A",
+            "B"
+          ],
+          "target": "S",
+          "support": "unknown",
+          "mode": "normal"
+        },
+        {
+          "op": "approve",
+          "actor": "reviewer",
+          "target": "S",
+          "approval": "G1"
+        },
+        {
+          "op": "copy",
+          "actor": "staff",
+          "source": "S",
+          "target": "C"
+        },
+        {
+          "op": "amend",
+          "actor": "reviewer",
+          "target": "C",
+          "approval": "G1"
+        },
+        {
+          "op": "use",
+          "actor": "staff",
+          "target": "C",
+          "purpose": "secondary",
+          "recipient": "internal"
+        }
+      ],
+      "expected": [
+        "PASS",
+        "PASS",
+        "PASS",
+        "REJECT",
+        "REJECT"
+      ]
+    },
+    {
+      "key": "residual_copy",
+      "label": "コピーが残れば終了しない",
+      "summary": "停止ボタンだけでは終了証明を出さず、要約とキャッシュの利用経路も確認します。",
+      "commands": [
+        {
+          "op": "derive",
+          "actor": "staff",
+          "parents": [
+            "A",
+            "B"
+          ],
+          "target": "S",
+          "support": "unknown",
+          "mode": "normal"
+        },
+        {
+          "op": "copy",
+          "actor": "staff",
+          "source": "S",
+          "target": "C"
+        },
+        {
+          "op": "freeze",
+          "actor": "operator",
+          "origin": "O-A"
+        },
+        {
+          "op": "use",
+          "actor": "staff",
+          "target": "S",
+          "purpose": "consultation",
+          "recipient": "internal"
+        },
+        {
+          "op": "use",
+          "actor": "staff",
+          "target": "B",
+          "purpose": "consultation",
+          "recipient": "internal"
+        },
+        {
+          "op": "close",
+          "actor": "operator",
+          "path": "A-read"
+        },
+        {
+          "op": "close",
+          "actor": "operator",
+          "path": "S-read"
+        },
+        {
+          "op": "certify",
+          "origin": "O-A",
+          "scope": "local-business",
+          "audit_exception": true,
+          "certificate": "T1"
+        },
+        {
+          "op": "close",
+          "actor": "operator",
+          "path": "C-read"
+        },
+        {
+          "op": "certify",
+          "origin": "O-A",
+          "scope": "local-business",
+          "audit_exception": true,
+          "certificate": "T1"
+        },
+        {
+          "op": "apply_certificate",
+          "certificate": "T1"
+        }
+      ],
+      "expected": [
+        "PASS",
+        "PASS",
+        "PASS",
+        "REJECT",
+        "PASS",
+        "PASS",
+        "PASS",
+        "REJECT",
+        "PASS",
+        "PASS",
+        "PASS"
+      ]
+    },
+    {
+      "key": "pending",
+      "label": "結果不明を消えた扱いにしない",
+      "summary": "開始済みコピーの結果不明を保持。遅れて判明した出力も閉鎖してから終了します。",
+      "commands": [
+        {
+          "op": "derive",
+          "actor": "staff",
+          "parents": [
+            "A",
+            "B"
+          ],
+          "target": "S",
+          "support": "unknown",
+          "mode": "normal"
+        },
+        {
+          "op": "start_copy",
+          "actor": "staff",
+          "source": "S",
+          "target": "D",
+          "operation": "P1"
+        },
+        {
+          "op": "mark_unknown",
+          "actor": "operator",
+          "operation": "P1"
+        },
+        {
+          "op": "freeze",
+          "actor": "operator",
+          "origin": "O-A"
+        },
+        {
+          "op": "close",
+          "actor": "operator",
+          "path": "A-read"
+        },
+        {
+          "op": "close",
+          "actor": "operator",
+          "path": "S-read"
+        },
+        {
+          "op": "certify",
+          "origin": "O-A",
+          "scope": "local-business",
+          "audit_exception": true,
+          "certificate": "T1"
+        },
+        {
+          "op": "settle",
+          "actor": "operator",
+          "operation": "P1",
+          "outcome": "completed"
+        },
+        {
+          "op": "certify",
+          "origin": "O-A",
+          "scope": "local-business",
+          "audit_exception": true,
+          "certificate": "T1"
+        },
+        {
+          "op": "close",
+          "actor": "operator",
+          "path": "D-read"
+        },
+        {
+          "op": "certify",
+          "origin": "O-A",
+          "scope": "local-business",
+          "audit_exception": true,
+          "certificate": "T1"
+        }
+      ],
+      "expected": [
+        "PASS",
+        "PASS",
+        "HOLD",
+        "PASS",
+        "PASS",
+        "PASS",
+        "HOLD",
+        "PASS",
+        "REJECT",
+        "PASS",
+        "PASS"
+      ]
+    },
+    {
+      "key": "inventory",
+      "label": "一覧の欠落を見逃さない",
+      "summary": "実体として管理する経路と登録一覧を照合。未登録を利用不能とはみなしません。",
+      "commands": [
+        {
+          "op": "derive",
+          "actor": "staff",
+          "parents": [
+            "A",
+            "B"
+          ],
+          "target": "S",
+          "support": "unknown",
+          "mode": "normal"
+        },
+        {
+          "op": "freeze",
+          "actor": "operator",
+          "origin": "O-A"
+        },
+        {
+          "op": "close",
+          "actor": "operator",
+          "path": "A-read"
+        },
+        {
+          "op": "close",
+          "actor": "operator",
+          "path": "S-read"
+        },
+        {
+          "op": "inventory_drop",
+          "actor": "operator",
+          "path": "S-read"
+        },
+        {
+          "op": "certify",
+          "origin": "O-A",
+          "scope": "local-business",
+          "audit_exception": true,
+          "certificate": "T1"
+        },
+        {
+          "op": "inventory_restore",
+          "actor": "operator"
+        },
+        {
+          "op": "certify",
+          "origin": "O-A",
+          "scope": "local-business",
+          "audit_exception": true,
+          "certificate": "T1"
+        }
+      ],
+      "expected": [
+        "PASS",
+        "PASS",
+        "PASS",
+        "PASS",
+        "PASS",
+        "HOLD",
+        "PASS",
+        "PASS"
+      ]
+    },
+    {
+      "key": "stale",
+      "label": "過去の証明を現在に流用しない",
+      "summary": "終了後に経路が復元されたら、過去の証明は履歴として残しても現在の根拠には使えません。",
+      "commands": [
+        {
+          "op": "derive",
+          "actor": "staff",
+          "parents": [
+            "A",
+            "B"
+          ],
+          "target": "S",
+          "support": "unknown",
+          "mode": "normal"
+        },
+        {
+          "op": "freeze",
+          "actor": "operator",
+          "origin": "O-A"
+        },
+        {
+          "op": "close",
+          "actor": "operator",
+          "path": "A-read"
+        },
+        {
+          "op": "close",
+          "actor": "operator",
+          "path": "S-read"
+        },
+        {
+          "op": "certify",
+          "origin": "O-A",
+          "scope": "local-business",
+          "audit_exception": true,
+          "certificate": "T1"
+        },
+        {
+          "op": "route_restore",
+          "actor": "operator",
+          "path": "S-read"
+        },
+        {
+          "op": "apply_certificate",
+          "certificate": "T1"
+        },
+        {
+          "op": "certify",
+          "origin": "O-A",
+          "scope": "local-business",
+          "audit_exception": true,
+          "certificate": "T1"
+        }
+      ],
+      "expected": [
+        "PASS",
+        "PASS",
+        "PASS",
+        "PASS",
+        "PASS",
+        "PASS",
+        "REJECT",
+        "REJECT"
+      ]
+    },
+    {
+      "key": "remote",
+      "label": "管理外の終了は未確認のまま",
+      "summary": "ローカル範囲の終了と、外部事業者を含む終了を区別。API内部の消去を保証しません。",
+      "commands": [
+        {
+          "op": "derive",
+          "actor": "staff",
+          "parents": [
+            "A",
+            "B"
+          ],
+          "target": "S",
+          "support": "unknown",
+          "mode": "normal"
+        },
+        {
+          "op": "remote_copy",
+          "actor": "operator",
+          "source": "S",
+          "target": "R"
+        },
+        {
+          "op": "freeze",
+          "actor": "operator",
+          "origin": "O-A"
+        },
+        {
+          "op": "close",
+          "actor": "operator",
+          "path": "A-read"
+        },
+        {
+          "op": "close",
+          "actor": "operator",
+          "path": "S-read"
+        },
+        {
+          "op": "certify",
+          "origin": "O-A",
+          "scope": "local-business",
+          "audit_exception": true,
+          "certificate": "T1"
+        },
+        {
+          "op": "certify",
+          "origin": "O-A",
+          "scope": "all-registered",
+          "audit_exception": true,
+          "certificate": "T1"
+        }
+      ],
+      "expected": [
+        "PASS",
+        "PASS",
+        "PASS",
+        "PASS",
+        "PASS",
+        "PASS",
+        "HOLD"
+      ]
+    },
+    {
+      "key": "audit",
+      "label": "監査保持を明示する",
+      "summary": "監査用の合成記録が残る以上、保持例外のない完全消去とは表現しません。",
+      "commands": [
+        {
+          "op": "derive",
+          "actor": "staff",
+          "parents": [
+            "A",
+            "B"
+          ],
+          "target": "S",
+          "support": "unknown",
+          "mode": "normal"
+        },
+        {
+          "op": "freeze",
+          "actor": "operator",
+          "origin": "O-A"
+        },
+        {
+          "op": "close",
+          "actor": "operator",
+          "path": "A-read"
+        },
+        {
+          "op": "close",
+          "actor": "operator",
+          "path": "S-read"
+        },
+        {
+          "op": "certify",
+          "origin": "O-A",
+          "scope": "local-business",
+          "audit_exception": false,
+          "certificate": "T1"
+        },
+        {
+          "op": "certify",
+          "origin": "O-A",
+          "scope": "local-business",
+          "audit_exception": true,
+          "certificate": "T1"
+        }
+      ],
+      "expected": [
+        "PASS",
+        "PASS",
+        "PASS",
+        "PASS",
+        "REJECT",
+        "PASS"
+      ]
+    },
+    {
+      "key": "provider_claim",
+      "label": "AI自身に制限を解除させない",
+      "summary": "模擬AIが条件なしと返しても、制御側が元の条件を付けて登録します。",
+      "commands": [
+        {
+          "op": "derive",
+          "actor": "staff",
+          "parents": [
+            "A",
+            "B"
+          ],
+          "target": "S",
+          "support": "unknown",
+          "mode": "claims_unrestricted"
+        },
+        {
+          "op": "use",
+          "actor": "staff",
+          "target": "S",
+          "purpose": "secondary",
+          "recipient": "internal"
+        },
+        {
+          "op": "use",
+          "actor": "staff",
+          "target": "S",
+          "purpose": "consultation",
+          "recipient": "external"
+        }
+      ],
+      "expected": [
+        "PASS",
+        "REJECT",
+        "REJECT"
+      ]
+    },
+    {
+      "key": "unknown_route",
+      "label": "不明を不存在にしない",
+      "summary": "観測できない読取り環境は、利用終了の根拠にはなりません。",
+      "commands": [
+        {
+          "op": "derive",
+          "actor": "staff",
+          "parents": [
+            "A",
+            "B"
+          ],
+          "target": "S",
+          "support": "unknown",
+          "mode": "normal"
+        },
+        {
+          "op": "freeze",
+          "actor": "operator",
+          "origin": "O-A"
+        },
+        {
+          "op": "close",
+          "actor": "operator",
+          "path": "A-read"
+        },
+        {
+          "op": "route_unknown",
+          "actor": "operator",
+          "path": "S-read"
+        },
+        {
+          "op": "certify",
+          "origin": "O-A",
+          "scope": "local-business",
+          "audit_exception": true,
+          "certificate": "T1"
+        },
+        {
+          "op": "close",
+          "actor": "operator",
+          "path": "S-read"
+        },
+        {
+          "op": "certify",
+          "origin": "O-A",
+          "scope": "local-business",
+          "audit_exception": true,
+          "certificate": "T1"
+        }
+      ],
+      "expected": [
+        "PASS",
+        "PASS",
+        "PASS",
+        "PASS",
+        "HOLD",
+        "PASS",
+        "PASS"
+      ]
+    },
+    {
+      "key": "expired_grant",
+      "label": "期限切れの承認を拒否",
+      "summary": "同じ出力・条件でも、変更証拠の有効期間を過ぎたら緩和しません。",
+      "commands": [
+        {
+          "op": "derive",
+          "actor": "staff",
+          "parents": [
+            "A",
+            "B"
+          ],
+          "target": "S",
+          "support": "unknown",
+          "mode": "normal"
+        },
+        {
+          "op": "approve",
+          "actor": "reviewer",
+          "target": "S",
+          "approval": "G1"
+        },
+        {
+          "op": "tick",
+          "actor": "operator",
+          "time": 4
+        },
+        {
+          "op": "amend",
+          "actor": "reviewer",
+          "target": "S",
+          "approval": "G1"
+        },
+        {
+          "op": "use",
+          "actor": "staff",
+          "target": "S",
+          "purpose": "secondary",
+          "recipient": "internal"
+        }
+      ],
+      "expected": [
+        "PASS",
+        "PASS",
+        "PASS",
+        "REJECT",
+        "REJECT"
+      ]
+    }
+  ]
+}
