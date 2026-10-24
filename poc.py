@@ -1,1134 +1,881 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Copyright © 2026 AI Assurance, Inc. All rights reserved. See README.md.
-"""源内公開API仕様 × 自治体AIアシュアランス3機能（固定合成データ専用）。
+"""自治体AI・回答採用アシュアランス 第1弾PoC（単一Python／標準ライブラリのみ）。
 
-python poc.py                 # run 31 scenarios; no external service or key
-python poc.py test            # original regressions + integration tests
-python poc.py verify PATH     # replay saved records, not authenticity certification
-python poc.py serve           # localhost UI + synchronous inputs/outputs REST API
-python poc.py ci              # strict: requires Lean and Node; never silently skips
+  python poc.py                       # 代表6件 + 参考30件 + 補完2件を実行
+  python poc.py run --case missing     # 代表ケースを1件だけ実行
+  python poc.py complete missing       # HOLD → 合成入力を補完 → 再判定
+  python poc.py verify output          # 保存パケットをPythonで再検証
+  python poc.py test                   # 回帰・異常入力・変更検出の自己テスト
 
-Existing sources and evidence are never edited. The answer/, privacy/ and
-lifecycle/ directories contain locked, byte-exact public source copies. No ZIP
-or extraction step is necessary. The shared profile binds their functionality.
+必須ファイルは本ファイルと cases.json の2つだけ。実AI、実制度、実住民情報、
+ネットワーク、形式証明検証器には接続しない。PASSは職員確認用の回答案のみ。
+元HTMLの8条件とJSON形式に対応する、範囲を限定した参照実装である。
 """
 from __future__ import annotations
 
 import argparse
 import copy
 import hashlib
-import hmac
 import html
-import importlib.util
-import itertools
 import json
 import math
-import os
-from pathlib import Path
 import re
-import secrets
-import shutil
-import subprocess
 import sys
-import tempfile
-import threading
-import time
-import urllib.error
-import urllib.request
 import uuid
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
+from collections import Counter
+from datetime import date, datetime, timezone
+from decimal import Decimal, ROUND_HALF_UP
+from pathlib import Path
+from typing import Any, Callable
 
 ROOT = Path(__file__).resolve().parent
-PROFILE_HASH = '51c5598cfce00bee6fc9742259382f6173ddb5d17eec0690582b04dca55bcedd'
-VERSION = '1.0.1'
-STATUSES = ('PASS', 'HOLD', 'REJECT')
-NOT_RUN = 'NOT_RUN'
-MAX_JSON_BYTES = 32 * 1024 * 1024
-HTTP_MAX_BYTES = 65536
+VERSION = "1.0.0"
+MAX_BYTES = 2 * 1024 * 1024
+MAX_SAFE_INTEGER = 9007199254740991
+# 受信パケットの自己申告を信頼基準にしない。元HTMLと同じ参照仕様・資料を固定。
+# 変更には仕様のレビューと本値の更新が必要。コード自体の認証・改変防止ではない。
+REFERENCE_SHA256 = "8e185f953e419889d20347181b3827294ba47353801eb74f68193e7e02a45a14"
+ORIGINAL_HTML_SHA256 = "3a52e33171a16e9c44ffff001176838e5a1a43c2a03844990b3c07b4cc60ff7a"
+PACKET_SCHEMA = "responsibility-information-packet/demo-1.0"
+CANONICALIZATION = "Recursively sorted object keys; array order preserved; JSON primitives; UTF-8; no whitespace"
+STATUSES = ("PASS", "HOLD", "REJECT")
+TITLES = {"PASS": "回答案として採用可", "HOLD": "職員による追加確認", "REJECT": "この回答案は不採用"}
 SCOPE = {
-    'synthetic_only': True, 'provider': 'local-synthetic-fixture',
-    'external_ai_calls': 0, 'gennai_hosted_environment_tested': False,
-    'gennai_oss_ui_tested': False, 'protocol': 'sync-inputs-outputs',
-    'government_endorsement': False, 'legal_compliance_certification': False,
-    'termination': 'registered-local-business-routes-only',
-    'audit_evidence_retained': True, 'signature_or_trusted_time': False,
+    "data": "fictional_sources_and_synthetic_applicant",
+    "method": "deterministic_rules_on_structured_claims",
+    "natural_language_inference": False, "formal_proof_checker": False,
+    "real_world_validation": False, "administrative_decision": False, "external_send": False,
 }
+NONCLAIMS = ["No legal compliance certification", "No source or issuer authentication",
+             "No real applicant verification", "No production privacy guarantee"]
 
 
 class InputError(ValueError):
-    """Bad input or evidence, not a successful business decision."""
+    """受理できない入力。採用判定とは区別し、処理を失敗終了させる。"""
 
 
-def require(ok: bool, message: str) -> None:
-    if not ok:
+def require(condition: bool, message: str) -> None:
+    if not condition:
         raise InputError(message)
 
 
+def validate_json_tree(value: Any, depth: int = 0) -> None:
+    """HTMLと曖昧なく照合するための、限定したJSON数値・Unicode受理域。"""
+    require(depth <= 32, "JSONの入れ子が深すぎます。")
+    t = type(value)
+    if value is None or t is bool:
+        return
+    if t is int:
+        require(abs(value) <= MAX_SAFE_INTEGER, "整数がJavaScriptの安全整数域を超えています。")
+    elif t is float:
+        # このPoCの小数は補助率（0～1、小数2桁まで）。任意数値のJCS実装ではない。
+        require(math.isfinite(value) and 0 <= value <= 1,
+                "小数は有限の補助率（0～1）に限定しています。")
+        require(Decimal(str(value)).as_tuple().exponent >= -2, "補助率の小数は2桁までです。")
+    elif t is str:
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise InputError("不正なUnicode文字列です。") from exc
+    elif t is list:
+        require(len(value) <= 2000, "JSON配列が大きすぎます。")
+        for item in value:
+            validate_json_tree(item, depth + 1)
+    elif t is dict:
+        require(len(value) <= 2000 and all(type(k) is str for k in value), "JSONオブジェクトが不正です。")
+        for k, v in value.items():
+            validate_json_tree(k, depth + 1)
+            validate_json_tree(v, depth + 1)
+    else:
+        raise InputError(f"JSONにできない型です：{t.__name__}")
+
+
 def canonical(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True,
-                      separators=(',', ':'), allow_nan=False)
+    """元HTMLのcanonicalと同じ表現。受理域はvalidate_json_treeで限定する。"""
+    if isinstance(value, dict):
+        keys = sorted(value, key=lambda k: k.encode("utf-16-be"))
+        return "{" + ",".join(canonical(k) + ":" + canonical(value[k]) for k in keys) + "}"
+    if isinstance(value, list):
+        return "[" + ",".join(canonical(x) for x in value) + "]"
+    if type(value) is float:
+        if value == 0:
+            return "0"
+        text = format(Decimal(str(value)), "f")
+        return text.rstrip("0").rstrip(".") if "." in text else text
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
 
 
 def digest(value: Any) -> str:
-    return hashlib.sha256(canonical(value).encode('utf-8')).hexdigest()
+    data = value if type(value) is str else canonical(value)
+    return hashlib.sha256(data.encode("utf-8")).hexdigest()
 
 
-def filehash(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def validate_tree(value: Any, depth: int = 0) -> None:
-    require(depth <= 70, 'JSON nesting is too deep')
-    if value is None or type(value) in (bool, str):
-        if type(value) is str:
-            require(len(value) <= 1_000_000, 'String too long')
-            try:
-                value.encode('utf-8')
-            except UnicodeError as exc:
-                raise InputError('Invalid Unicode') from exc
-        return
-    if type(value) is int:
-        require(abs(value) <= 9007199254740991, 'Integer outside safe range')
-        return
-    if type(value) is float:
-        require(math.isfinite(value) and abs(value) <= 9007199254740991, 'Invalid numeric value')
-        return
-    if type(value) is list:
-        require(len(value) <= 20000, 'Array too long')
-        for item in value:
-            validate_tree(item, depth + 1)
-        return
-    require(type(value) is dict and len(value) <= 20000, 'Invalid JSON object')
-    for key, item in value.items():
-        require(type(key) is str, 'Non-string object key')
-        validate_tree(key, depth + 1)
-        validate_tree(item, depth + 1)
+def same(a: Any, b: Any) -> bool:
+    # Pythonの True == 1 を、JSON上の同一性として誤って採用しない。
+    return canonical(a) == canonical(b)
 
 
 def parse_json(text: str) -> Any:
-    require(type(text) is str and len(text.encode('utf-8')) <= MAX_JSON_BYTES, 'Oversized JSON')
-    def pairs(items):
-        result = {}
+    def pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
         for key, value in items:
-            require(key not in result, 'Duplicate JSON key: ' + key)
+            require(key not in result, f"JSONキーが重複しています：{key}")
             result[key] = value
         return result
-    def bad_number(value):
-        raise InputError('Non-finite JSON number: ' + value)
+
+    def invalid_constant(value: str) -> Any:
+        raise InputError(f"NaN・Infinityは受理しません：{value}")
+
     try:
-        result = json.loads(text, object_pairs_hook=pairs, parse_constant=bad_number)
-        validate_tree(result)
+        result = json.loads(text.lstrip("\ufeff"), object_pairs_hook=pairs, parse_constant=invalid_constant)
+        validate_json_tree(result)
         return result
-    except (UnicodeError, RecursionError, json.JSONDecodeError) as exc:
-        raise InputError('Invalid JSON') from exc
+    except (json.JSONDecodeError, RecursionError, UnicodeError) as exc:
+        raise InputError(f"JSONを読み込めません：{exc}") from exc
 
 
 def read_json(path: Path) -> Any:
-    require(path.is_file() and path.stat().st_size <= MAX_JSON_BYTES, 'Missing/oversized JSON: ' + str(path))
-    return parse_json(path.read_text(encoding='utf-8-sig'))
+    require(path.is_file(), f"ファイルがありません：{path}")
+    require(path.stat().st_size <= MAX_BYTES, f"JSONは2MB以下にしてください：{path}")
+    return parse_json(path.read_text(encoding="utf-8-sig"))
 
 
-def write_json(path: Path, data: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + '.tmp-' + uuid.uuid4().hex)
+def write_json(path: Path, value: Any) -> None:
+    path.write_text(json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+
+
+def check_keys(value: Any, keys: set[str], where: str) -> None:
+    require(type(value) is dict, f"{where}はオブジェクトで指定してください。")
+    require(set(value) == keys, f"{where}の項目が不正です。欠落={sorted(keys-set(value))} / 未定義={sorted(set(value)-keys)}")
+
+
+def string(value: Any, where: str, maximum: int = 2000, nullable: bool = False) -> None:
+    if nullable and value is None:
+        return
+    require(type(value) is str and 0 < len(value) <= maximum, f"{where}は空でない文字列にしてください。")
+
+
+def iso_date(value: Any, where: str) -> None:
+    require(type(value) is str and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value) is not None,
+            f"{where}の日付はYYYY-MM-DD形式で指定してください。")
     try:
-        with temporary.open('x', encoding='utf-8', newline='\n') as stream:
-            json.dump(data, stream, ensure_ascii=False, indent=2, allow_nan=False)
-            stream.write('\n')
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-    finally:
-        if temporary.exists():
-            temporary.unlink()
+        require(date.fromisoformat(value).isoformat() == value, f"{where}の日付が不正です。")
+    except ValueError as exc:
+        raise InputError(f"{where}に存在しない日付が指定されています。") from exc
 
 
-def config() -> dict:
-    value = read_json(ROOT / 'cases.json')
-    require(digest(value) == PROFILE_HASH, 'Fixed shared profile or source lock changed; do not treat this as the reviewed version')
-    return value
+def worst(values: list[str]) -> str:
+    return "REJECT" if "REJECT" in values else "HOLD" if "HOLD" in values else "PASS"
 
 
-def prepare_dependencies(cfg: dict) -> None:
-    """Validate all nine GitHub-uploaded source files, without ZIP or extraction."""
-    expected_names = {
-        f'{name}/{filename}'
-        for name, model in [('answer', 'CivicAnswerAdoption.lean'),
-                            ('privacy', 'CivicPrivacyAssurance.lean'),
-                            ('lifecycle', 'CivicLifecycleAssurance.lean')]
-        for filename in ('poc.py', 'cases.json', model)
-    }
-    require(set(cfg['upstream_files']) == expected_names,
-            'Unexpected source manifest: exactly 9 direct files required')
-    for name, lock in cfg['upstream_files'].items():
-        rel = Path(name)
-        require(not rel.is_absolute() and '..' not in rel.parts and len(rel.parts) == 2,
-                'Unsafe source path')
-        source = ROOT / rel
-        require(source.is_file() and not source.is_symlink() and not source.parent.is_symlink(),
-                'Missing or unsafe source file: ' + name)
-        require(source.stat().st_size == lock['size'], 'Unexpected source size: ' + name)
-        require(filehash(source) == lock['sha256'], 'Source bytes changed: ' + name)
+def date_jp(value: str) -> str:
+    year, month, day = value.split("-")
+    return f"{year}年{int(month)}月{int(day)}日"
 
 
-def source_binding(cfg: dict) -> dict:
-    files = ['poc.py', 'cases.json', 'CivicBridge.lean', 'lean-toolchain', 'lakefile.toml']
-    return {'version': VERSION, 'profile_sha256': PROFILE_HASH,
-            'integration_files': {name: hashlib.sha256((ROOT / name).read_bytes().replace(b'\r\n', b'\n')).hexdigest() for name in files},
-            'integration_text_normalization': 'CRLF-to-LF-only',
-            'source_layout': 'direct-verified-folders', 'sources': cfg['sources']}
+def value_label(key: str, value: Any) -> str:
+    if key == "max_yen":
+        number = (Decimal(value) / 10000).quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
+        text = f"{number:,.3f}".rstrip("0").rstrip(".")
+        return text + "万円"
+    if key == "rate":
+        if value == 0.5:
+            return "1/2"
+        percent = value * 100
+        return (str(int(percent)) if percent == int(percent) else str(percent)) + "%"
+    if key == "deadline":
+        return date_jp(value)
+    if key == "eligibility":
+        return {"candidate": "案内上の対象候補", "out_of_scope": "今回の条件では対象外", "needs_review": "条件が未確認"}.get(value, str(value))
+    if key == "conditions":
+        return f"{len(value)}項目を明示" if isinstance(value, list) else "不明"
+    if key == "award_guarantee":
+        return "受給・採択を断定" if value else "正式な申請・審査が必要"
+    return str(value)
 
 
-class Components:
-    """Load three original modules under separate names; never monkey-patch them."""
-    def __init__(self, cfg: dict):
-        prepare_dependencies(cfg)
-        self.modules = {}
-        self.engines = {}
-        for name in ('answer', 'privacy', 'lifecycle'):
-            path = ROOT / name / 'poc.py'
-            module_name = 'civic_bridge_upstream_' + name
-            spec = importlib.util.spec_from_file_location(module_name, path)
-            require(spec is not None and spec.loader is not None, 'Cannot load source')
-            module = importlib.util.module_from_spec(spec)
-            sys.modules[module_name] = module
-            raw = path.read_bytes()
-            require(hashlib.sha256(raw).hexdigest() == cfg['upstream_files'][name + '/poc.py']['sha256'],
-                    'Source changed before execution')
-            exec(compile(raw, str(path), 'exec'), module.__dict__)  # Never trust a cached .pyc.
-            self.modules[name] = module
-            self.engines[name] = module.Engine(module.read_json(path.parent / 'cases.json'))
+def build_text(claims: dict[str, Any]) -> str:
+    """構造化主張からの固定テンプレート。自由文を理解・証明する処理ではない。"""
+    v = {k: c["value"] for k, c in claims.items()}
+    loc = v["municipality"]
+    if v["eligibility"] == "out_of_scope":
+        intro = f"ご相談の条件では、{loc}の「デジタル活用支援補助金」の対象条件を満たさない項目があります。"
+    elif v["eligibility"] == "needs_review":
+        intro = f"{loc}の「デジタル活用支援補助金」を案内するには、未確認の相談条件を補う必要があります。"
+    else:
+        intro = f"{loc}の「デジタル活用支援補助金」の対象候補です。"
+    amounts = f"補助率は{value_label('rate', v['rate'])}、上限は{value_label('max_yen', v['max_yen'])}です。申請期限は{date_jp(v['deadline'])}です。"
+    labels = {"establishment": "自治体内の事業所", "employees": "常用従業員20人以下",
+              "tax": "市税の滞納がないこと", "duplicate": "同じ経費での重複補助がないこと"}
+    arr = v["conditions"]
+    conditions = "、".join(labels[k] for k in arr if k in labels)
+    last = ("この条件なら補助金の受給・採択が確定します。" if v["award_guarantee"] else
+            "これは制度案内であり、受給・採択の決定ではありません。正式な申請・審査と、職員による回答確認が必要です。" if "human_decision" in arr else "")
+    return "\n\n".join(x for x in (intro, amounts, f"確認条件：{conditions}。" if conditions else "", last) if x)
 
 
-def compose(observation: dict) -> dict:
-    """Finite composition model; input identities are derived, not model assertions."""
-    keys = {'send', 'output', 'answer', 'same_request', 'same_answer', 'origins_bound',
-            'registered', 'use', 'action_ok'}
-    require(type(observation) is dict and set(observation) == keys, 'Invalid composition observation')
-    for key in ('send', 'output', 'answer', 'use'):
-        require(observation[key] in (*STATUSES, NOT_RUN), 'Unknown status')
-    for key in keys - {'send', 'output', 'answer', 'use'}:
-        require(type(observation[key]) is bool, 'Composition flags must be Boolean')
-    eligible = (all(observation[k] == 'PASS' for k in ('send', 'output', 'answer'))
-                and observation['same_request'] and observation['same_answer']
-                and observation['origins_bound'])
-    return {'may_register': eligible,
-            'may_supply': eligible and observation['registered'] and observation['use'] == 'PASS'
-                          and observation['action_ok']}
-
-
-class PrivacyAdapter:
-    """New subsidy profile, original P2 8/4-check aggregation, no P2 policy mutation.
-
-    Only the observation boundary and explanatory labels are new. This is not a
-    claim that the original fixed childcare fixture accepts arbitrary inputs.
-    """
-    def __init__(self, profile: dict, original_module: Any, expected_wire: dict):
-        self.profile = profile
-        self.module = original_module
-        self.expected_wire = expected_wire
-        self.policy = {'gate_names': profile['privacy_gate_names'],
-                       'output_gate_names': profile['output_gate_names']}
-
-    def observations(self, request: dict, state: dict) -> dict:
-        wire = request['wire']
-        fields = set(wire['applicant'])
-        new = fields - set(state['disclosed'])
-        weights = self.profile['fields']
-        return {
-            'sourceOK': request['case_id'] == wire['case_id'] == state['case_id'],
-            'scopeOK': request['purpose'] == self.profile['purpose'] and request['human_confirmation'] is True,
-            'authorityKnown': request['basis'] != 'missing',
-            'authorityOK': request['basis'] == 'confirmed' and request['role'] == self.profile['role'],
-            'termsKnown': True,
-            'recipientOK': request['recipient'] == self.profile['recipient'],
-            'termsOK': request['retention_days'] == 0 and request['training'] is False,
-            'fieldsOK': fields == set(weights) and set(wire) == {'case_id', 'target', 'as_of', 'applicant', 'sources'},
-            'evidenceKnown': True,
-            'payloadOK': wire == self.expected_wire,
-            'ledgerKnown': state['known'], 'pending': state['pending'],
-            'duplicate': request['request_id'] in state['used_ids'],
-            'used': sum(weights.get(k, 0) for k in state['disclosed']),
-            'additional': sum(weights.get(k, 0) for k in new), 'limit': request['limit'],
-        }
-
-    def evaluate(self, request: dict, state: dict) -> dict:
-        result = self.module.Engine.evaluate(self, request, state)
-        # Source P2 includes fixed childcare explanations; do not mislabel the new profile.
-        notes = ['共通案件IDと管理台帳の対象を照合。', '補助金案内・職員確認用の用途を照合。',
-                 '固定合成シナリオの利用根拠と模擬権限を照合。', 'ローカル合成生成器と取扱条件を照合。',
-                 '相談条件4項目だけを送信対象とする。氏名・住所は対象外。', '判定対象と受信器へ渡すデータの完全一致を照合。',
-                 '同一合成対象について、既開示項目と新規項目のデモ点数を集計。', '未確定要求と同一要求IDの再実行を止める。']
-        for check, note in zip(result['checks'], notes):
-            check['detail'] = note
-        return result
-
-    def output_observations(self, request: dict, wire: dict, response: dict | None, attempted: bool) -> dict:
-        available = type(response) is dict
-        candidate = response.get('candidate') if available else None
-        shape = (available and set(response) == {'request_digest', 'case_id', 'candidate', 'claimed_conditions'}
-                 and type(candidate) is dict and set(candidate) == {'program_id', 'claims', 'text'}
-                 and type(candidate.get('text')) is str and type(candidate.get('claims')) is dict)
-        public = canonical(candidate) if type(candidate) is dict else ''
-        return {
-            'available': available and attempted,
-            'acknowledged': available and attempted,
-            'bindingKnown': available and response.get('request_digest') is not None,
-            'bindingOK': available and response.get('request_digest') == digest(wire)
-                         and response.get('case_id') == wire['case_id'],
-            'fieldsOK': bool(shape),
-            'textOK': bool(shape) and all(value not in public for value in self.profile['private'].values()),
-            'useOK': request['human_confirmation'] is True,
-        }
-
-    def evaluate_output(self, request: dict, wire: dict, response: dict | None, attempted: bool) -> dict:
-        result = self.module.Engine.evaluate_output(self, request, wire, response, attempted)
-        notes = ['受信した応答の案件ID・要求内容識別値を照合。', '構造化回答の許可された項目を検査。',
-                 '固定合成の氏名・住所が再混入していないか検査。自由文一般の個人情報検出ではない。',
-                 '職員確認用の案内文。受給決定や自動対外送信は許可しない。']
-        for check, note in zip(result['checks'], notes):
-            check['detail'] = note
-        return result
-
-
-class BoundGenerator:
-    """P3 provider port: reuse the EXACT already-checked answer, not a second answer."""
-    def __init__(self, module: Any, texts: list[str], answer: str):
-        self.module, self.texts, self.answer = module, texts, answer
-        self.calls = 0
-
-    def generate(self, request: dict) -> dict:
-        require(request['input_objects'] == ['A', 'B'] and request['texts'] == self.texts,
-                'Lifecycle input substituted')
-        require(request['input_digests'] == [self.module.digest(t) for t in self.texts],
-                'Lifecycle content binding mismatch')
-        self.calls += 1
-        return {'request_id': request['request_id'], 'provider': 'mock', 'outcome': 'completed',
-                'text': self.answer, 'claimed_conditions': []}
-
-
-def lifecycle_commands(mode: str) -> list[dict]:
-    def use(purpose='consultation', recipient='internal'):
-        return {'op': 'use', 'actor': 'staff', 'target': 'S', 'purpose': purpose, 'recipient': recipient}
-    if mode == 'read':
-        return [use()]
-    if mode == 'secondary':
-        return [use('secondary')]
-    if mode == 'approve_secondary':
-        return [{'op': 'approve', 'actor': 'reviewer', 'target': 'S', 'approval': 'G1'},
-                {'op': 'amend', 'actor': 'reviewer', 'target': 'S', 'approval': 'G1'}, use('secondary')]
-    if mode == 'external':
-        return [use(recipient='external')]
-    if mode == 'expired':
-        return [{'op': 'tick', 'actor': 'operator', 'time': 10}, use()]
-    if mode == 'unknown_path':
-        return [{'op': 'route_unknown', 'actor': 'operator', 'path': 'S-read'}, use()]
-    if mode in ('copy_left', 'closed', 'stale_certificate'):
-        commands = [
-            {'op': 'copy', 'actor': 'staff', 'source': 'S', 'target': 'C'},
-            {'op': 'freeze', 'actor': 'operator', 'origin': 'O-A'},
-            {'op': 'close', 'actor': 'operator', 'path': 'A-read'},
-            {'op': 'close', 'actor': 'operator', 'path': 'S-read'},
-        ]
-        if mode != 'copy_left':
-            commands.append({'op': 'close', 'actor': 'operator', 'path': 'C-read'})
-        commands.append({'op': 'certify', 'origin': 'O-A', 'scope': 'local-business',
-                         'audit_exception': True, 'certificate': 'T1'})
-        if mode == 'stale_certificate':
-            commands += [{'op': 'route_restore', 'actor': 'operator', 'path': 'S-read'},
-                         {'op': 'apply_certificate', 'certificate': 'T1'}]
-        return commands
-    raise InputError('Unknown lifecycle scenario')
-
-
-class Bridge:
-    def __init__(self):
-        self.cfg = config()
-        self.c = Components(self.cfg)
-        self.binding = source_binding(self.cfg)
-        self.profile = self.cfg['profile']
-        self.scenarios = {s['key']: s for s in self.cfg['scenarios']}
-        self._lock = threading.RLock()
-
-    def wire(self, scenario: dict) -> dict:
-        base = self.c.engines['answer'].base()
-        app = {k: copy.deepcopy(base['applicant'][k]) for k in self.profile['fields']}
-        app.update(copy.deepcopy(scenario['applicant']))
-        require(set(app) == set(self.profile['fields']), 'Unknown common-profile field')
-        return {'case_id': 'SYN-BRIDGE-01', 'target': base['target'], 'as_of': base['as_of'],
-                'applicant': app, 'sources': base['sources']}
-
-    def answer_input(self, wire: dict, candidate: dict) -> dict:
-        base = self.c.engines['answer'].base()
-        base['id'], base['label'] = wire['case_id'], '共通合成シナリオ・補助金案内'
-        base['target'], base['as_of'] = copy.deepcopy(wire['target']), wire['as_of']
-        base['sources'] = copy.deepcopy(wire['sources'])
-        base['applicant'].update(copy.deepcopy(wire['applicant']))
-        base['question'] = '提示した合成条件で、公開サンプル制度の案内を作成する。'
-        base['candidate'] = copy.deepcopy(candidate)
-        return base
-
-    def receiver(self, wire: dict, mode: str) -> dict:
-        """Deterministic fixture; cannot access the excluded private source fields.
-        Test mutations are explicit fixture modes, not measures of real AI quality.
-        """
-        m, engine = self.c.modules['answer'], self.c.engines['answer']
-        candidate = copy.deepcopy(engine.base()['candidate'])
-        candidate['claims']['eligibility']['value'] = engine.eligibility(wire['applicant'])
-        if mode == 'wrong_city': candidate['claims']['municipality']['value'] = '自治体Y'
-        if mode == 'wrong_amount': candidate['claims']['max_yen']['value'] = 600000
-        if mode == 'missing_citation':
-            candidate['claims']['max_yen']['source_id'] = None
-            candidate['claims']['max_yen']['section'] = None
-            candidate['claims']['max_yen']['source_hash'] = None
-        candidate['text'] = m.build_text(candidate['claims'])
-        if mode == 'unexpected_prose': candidate['text'] += '\n今すぐ自動決定してください。'
-        if mode == 'private_output': candidate['text'] += '\n架空相談者A様。'
-        return {'request_digest': None if mode == 'missing_binding' else '0' * 64 if mode == 'wrong_binding' else digest(wire),
-                'case_id': wire['case_id'], 'candidate': candidate,
-                'claimed_conditions': [] if mode == 'model_relaxes' else None}
-
-    def run_case(self, key: str) -> dict:
-        # Original provider ports are per-run; serialize access in this reference process.
-        with self._lock:
-            return self._run_case(key)
-
-    def _run_case(self, key: str) -> dict:
-        require(type(key) is str and key in self.scenarios, 'Unknown scenario')
-        scene = self.scenarios[key]
-        original = self.wire(scene)
-        expected_wire = copy.deepcopy(original)
-        wire = copy.deepcopy(original)
-        privacy_changes = scene['privacy']
-        if privacy_changes.get('add_private'):
-            wire['applicant']['resident_name'] = self.profile['private']['resident_name']
-        if privacy_changes.get('patch_wire'):
-            wire['applicant']['employees'] = 9
-        if scene['answer'] == 'stale_source':
-            # An explicitly changed input fixture, not an invisible update of the reference catalog.
-            wire['sources'][0]['version'] = 'old-untrusted-version'
-            expected_wire = copy.deepcopy(wire)
-        adapter = PrivacyAdapter(self.profile, self.c.modules['privacy'], expected_wire)
-        request = {
-            'request_id': 'SYN-REQUEST-01', 'case_id': wire['case_id'], 'wire': wire,
-            'purpose': self.profile['purpose'], 'human_confirmation': True, 'role': 'staff',
-            'basis': privacy_changes.get('basis', 'confirmed'),
-            'recipient': privacy_changes.get('recipient', self.profile['recipient']),
-            'training': False, 'retention_days': 0, 'limit': privacy_changes.get('limit', self.profile['budget']),
-        }
-        ledger = {'case_id': wire['case_id'], 'known': privacy_changes.get('history_known', True),
-                  'pending': False, 'disclosed': [], 'used_ids': [], 'revision': 0}
-        events, received = [], []
-        previous = digest({'profile': PROFILE_HASH, 'scenario': key})
-        def event(kind: str, details: dict):
-            nonlocal previous
-            body = {'sequence': len(events) + 1, 'previous': previous, 'kind': kind, 'data': copy.deepcopy(details)}
-            previous = digest(body)
-            events.append({'body': body, 'sha256': previous})
-        send = adapter.evaluate(request, ledger)
-        before = copy.deepcopy(ledger)
-        observations = adapter.observations(request, ledger)
-        response = None
-        if send['decision'] == 'PASS':
-            # Commit intent/consumption BEFORE the call. Unknown delivery never rolls it back.
-            ledger['disclosed'] = sorted(set(ledger['disclosed']) | set(wire['applicant']))
-            ledger['used_ids'].append(request['request_id'])
-            ledger['revision'] += 1
-            ledger['pending'] = True
-            encoded = canonical(wire).encode('utf-8')
-            actual_wire = parse_json(encoded.decode('utf-8'))
-            received.append({'request_digest': digest(actual_wire), 'bytes_sha256': hashlib.sha256(encoded).hexdigest()})
-            if privacy_changes.get('delivery') != 'unknown':
-                response = self.receiver(actual_wire, scene['answer'])
-                ledger['pending'] = False
-        event('privacy.send', {'request': request, 'observation': observations, 'before': before,
-                               'result': send, 'after': ledger, 'receiver_calls': len(received)})
-        output, answer = NOT_RUN, NOT_RUN
-        output_result = None
-        same_request, same_answer, origins_bound = False, False, False
-        action_status, action_name = send['decision'], '回答案の採用・利用'
-        lifecycle_state, lifecycle_results = None, []
-        accepted_hash, verified_text = None, None
-        if send['decision'] == 'PASS':
-            output_result = adapter.evaluate_output(request, wire, response, True)
-            output = output_result['decision']
-            same_request = bool(response and response['request_digest'] == digest(wire) and response['case_id'] == wire['case_id'])
-            event('privacy.output', {'response': response, 'observation': adapter.output_observations(request, wire, response, True),
-                                    'result': output_result})
-            action_status = output
-            if output == 'PASS':
-                x = self.answer_input(wire, response['candidate'])
-                result = self.c.engines['answer'].evaluate(x)
-                answer = result['decision']
-                event('answer.adoption', {'input': x, 'result': result})
-                action_status = answer
-                if answer == 'PASS':
-                    verified_text = response['candidate']['text']
-                    accepted_hash = digest(verified_text)
-                    managed_text = verified_text + ('\n検証後の無許可変更。' if scene['answer'] == 'postcheck_tamper' else '')
-                    same_answer = digest(managed_text) == accepted_hash
-                    origins_bound = (wire['case_id'] == original['case_id']
-                                     and digest(wire['sources']) == digest(self.c.engines['answer'].base()['sources']))
-                    pre = {'send': send['decision'], 'output': output, 'answer': answer,
-                           'same_request': same_request, 'same_answer': same_answer, 'origins_bound': origins_bound,
-                           'registered': False, 'use': NOT_RUN, 'action_ok': True}
-                    registration = compose(pre)
-                    event('composition.registration', {'observation': pre, 'result': registration,
-                                                       'checked_answer_sha256': accepted_hash, 'managed_answer_sha256': digest(managed_text)})
-                    if not registration['may_register']:
-                        action_status = 'REJECT'
-                    else:
-                        lm = self.c.modules['lifecycle']
-                        le = self.c.engines['lifecycle']
-                        # New adapter initial state. Only the two text values are substituted.
-                        # Original origin conditions, actors, deadlines, transition logic stay intact.
-                        lifecycle_state = le.initial()
-                        lifecycle_state['objects']['A']['text'] = canonical(wire['applicant'])
-                        lifecycle_state['objects']['B']['text'] = canonical({'target': wire['target'], 'sources': wire['sources']})
-                        initial = copy.deepcopy(lifecycle_state)
-                        texts = [lifecycle_state['objects'][k]['text'] for k in ('A', 'B')]
-                        port = BoundGenerator(lm, texts, managed_text)
-                        prior_provider = le.provider
-                        le.provider = port
-                        try:
-                            commands = [{'op': 'derive', 'actor': 'staff', 'parents': ['A', 'B'],
-                                         'target': 'S', 'support': 'unknown', 'mode': 'normal'}] + lifecycle_commands(scene['lifecycle'])
-                            event('lifecycle.initial', {'wire_sha256': digest(wire), 'state': initial,
-                                                      'initial_state_sha256': digest(initial), 'scope': self.profile['scope']})
-                            for command in commands:
-                                before_state = copy.deepcopy(lifecycle_state)
-                                lifecycle_state, result = le.apply(lifecycle_state, command)
-                                lifecycle_results.append(result)
-                                event('lifecycle.operation', {'command': command, 'before_sha256': digest(before_state),
-                                                              'after_sha256': digest(lifecycle_state), 'result': result})
-                            require(port.calls == 1, 'Lifecycle must register exactly the checked answer once')
-                        finally:
-                            le.provider = prior_provider
-                        action_status = lifecycle_results[-1]['status']
-                        if scene['lifecycle'] in ('copy_left', 'closed'): action_name = '管理範囲の利用終了確認'
-                        if scene['lifecycle'] == 'stale_certificate': action_name = '現在状態への終了証明の適用'
-        if privacy_changes.get('duplicate') and received:
-            retry_before = copy.deepcopy(ledger)
-            retry_request = copy.deepcopy(request)
-            # Unknown-result case uses a NEW request ID to demonstrate pending-state blocking.
-            if ledger['pending']:
-                retry_request['request_id'] = 'SYN-REQUEST-02'
-            retry_result = adapter.evaluate(retry_request, ledger)
-            require(retry_result['decision'] != 'PASS', 'Unsafe retry allowed')
-            event('privacy.retry', {'request': retry_request, 'before': retry_before,
-                                   'observation': adapter.observations(retry_request, ledger), 'result': retry_result,
-                                   'after': ledger, 'receiver_calls': len(received)})
-            action_status = retry_result['decision']
-        registered = lifecycle_state is not None and 'S' in lifecycle_state['objects']
-        use_status, current_text = NOT_RUN, None
-        if registered:
-            lm, le = self.c.modules['lifecycle'], self.c.engines['lifecycle']
-            obj = lifecycle_state['objects']['S']
-            same_answer = accepted_hash == digest(obj['text'])
-            # Preserve the actual origins, including unchanged restrictions from origin B.
-            expected_terms = lm.unique_terms([t for parent in ('A', 'B')
-                                               for t in lifecycle_state['objects'][parent]['conditions']])
-            if any(r['operation'] == 'amend' and r['status'] == 'PASS' for r in lifecycle_results):
-                grant = le.ref['grant_scope']
-                old_term = {'origin': grant['origin'], 'kind': grant['kind'], 'value': grant['from']}
-                expected_terms = [{**t, 'value': grant['to']} if t == old_term else t for t in expected_terms]
-            origins_bound = (obj['parents'] == ['A', 'B'] and obj['origins'] == ['O-A', 'O-B']
-                             and lm.unique_terms(obj['conditions']) == lm.unique_terms(expected_terms))
-            requested = lifecycle_results[-1]
-            if requested['operation'] == 'use':
-                use_status = requested['status']
-                if requested['released'] is not None:
-                    current_text = requested['released']['text']
-        observation = {'send': send['decision'], 'output': output, 'answer': answer,
-                       'same_request': same_request, 'same_answer': same_answer, 'origins_bound': origins_bound,
-                       'registered': registered, 'use': use_status, 'action_ok': action_status == 'PASS'}
-        permits = compose(observation)
-        emitted = current_text if permits['may_supply'] else None
-        if emitted is not None:
-            require(digest(emitted) == accepted_hash, 'Supplied answer differs from checked answer')
-        event('composition.supply', {'observation': observation, 'result': permits,
-                                    'emitted_sha256': digest(emitted) if emitted is not None else None})
-        payload = {'schema': 'gennai-civic-bridge-record/1.0', 'scenario': key, 'label': scene['label'],
-                   'source_binding': self.binding, 'scope': SCOPE, 'wire': wire,
-                   'events': events, 'receiver_calls': received, 'ledger': ledger,
-                   'lifecycle_state': lifecycle_state,
-                   'summary': {'send': send['decision'], 'output': output, 'answer': answer,
-                               'action': action_name, 'decision': action_status,
-                               'registered': registered, 'supplied': permits['may_supply'],
-                               'lifecycle': lifecycle_results[-1]['status'] if lifecycle_results else NOT_RUN,
-                               'local_receiver_calls': len(received), 'external_ai_calls': 0,
-                               'pending': ledger['pending'], 'used_units': sum(self.profile['fields'].get(k, 0) for k in ledger['disclosed']),
-                               'answer_text': emitted, 'observation': observation,
-                               'termination_confirmed': bool(lifecycle_results and lifecycle_results[-1]['operation'] == 'certify'
-                                                             and lifecycle_results[-1]['status'] == 'PASS')}}
-        return {'payload': payload, 'sha256': digest(payload)}
-
-    def verify(self, record: dict) -> dict:
-        validate_tree(record)
-        require(type(record) is dict and set(record) == {'payload', 'sha256'}, 'Invalid record envelope')
-        p = record['payload']
-        require(type(p) is dict and p.get('schema') == 'gennai-civic-bridge-record/1.0', 'Unknown evidence schema')
-        require(p.get('source_binding') == self.binding, 'Record belongs to a different source/profile version')
-        require(type(p.get('scenario')) is str and p['scenario'] in self.scenarios, 'Unknown evidence scenario')
-        expected = self.run_case(p['scenario'])
-        intact = digest(p) == record['sha256']
-        same = record == expected
-        return {'ok': intact and same, 'intact': intact, 'replayed': same,
-                'decision': expected['payload']['summary']['decision'],
-                'scope': 'fixed-synthetic-execution-consistency; not issuer authentication or present-world observation'}
-
-    def all_records(self) -> dict:
-        return {'schema': 'gennai-civic-bridge-evidence/1.0', 'source_binding': self.binding,
-                'records': [self.run_case(key) for key in self.scenarios]}
-
-    def verify_document(self, value: dict) -> int:
-        if 'payload' in value:
-            require(self.verify(value)['ok'], 'Record replay failed')
-            return 1
-        require(set(value) == {'schema', 'source_binding', 'records'} and value['schema'] == 'gennai-civic-bridge-evidence/1.0',
-                'Invalid evidence collection')
-        require(value['source_binding'] == self.binding, 'Evidence collection source mismatch')
-        require(type(value['records']) is list and [r.get('payload', {}).get('scenario') for r in value['records']] == list(self.scenarios),
-                'Missing, duplicated, reordered, or extra scenario records')
-        for record in value['records']:
-            require(self.verify(record)['ok'], 'A scenario did not replay')
-        return len(value['records'])
-
-    def registration(self) -> dict:
-        return {'scenario': {'type': 'select', 'title': '合成検証シナリオ', 'required': True,
-                             'desc': '実住民情報は入力しないでください。全ケースは独立した合成実験です。',
-                             'items': [{'title': s['label'], 'value': s['key']} for s in self.scenarios.values()],
-                             'default_value': 'normal'}}
-
-    def invoke(self, body: dict) -> tuple[dict, dict]:
-        require(type(body) is dict and set(body) == {'inputs'}, 'Expected only inputs')
-        require(type(body['inputs']) is dict and set(body['inputs']) == {'scenario'}, 'Expected only inputs.scenario')
-        key = body['inputs']['scenario']
-        require(type(key) is str and key in self.scenarios, 'Unknown scenario')
-        record = self.run_case(key)
-        summary = record['payload']['summary']
-        # Do not leak a rejected, unverified, or retired draft through the normal outputs field.
-        text = f"## {record['payload']['label']}\n\n**{summary['action']}：{summary['decision']}**\n\n"
-        text += f"送信 {summary['send']} / 出力情報検査 {summary['output']} / 回答採用 {summary['answer']}\n\n"
-        text += summary['answer_text'] if summary['supplied'] else 'この操作では回答本文を出力しません。'
-        text += '\n\n記録ID：`' + record['sha256'] + '`\n\n固定合成データの検証です。行政決定・本番導入・政府認定を意味しません。'
-        return {'outputs': text}, record
-
-
-def all_composition_inputs():
-    for statuses in itertools.product((*STATUSES, NOT_RUN), repeat=4):
-        for flags in itertools.product((False, True), repeat=5):
-            yield dict(zip(('send', 'output', 'answer', 'use'), statuses),
-                       **dict(zip(('same_request', 'same_answer', 'origins_bound', 'registered', 'action_ok'), flags)))
-
-
-def run_tests(bridge: Bridge) -> dict:
-    rows = []
-    def check(name, action):
-        try:
-            require(action() is True, 'Expectation not met')
-            rows.append({'name': name, 'passed': True})
-        except Exception as exc:
-            rows.append({'name': name, 'passed': False, 'error': type(exc).__name__ + ': ' + str(exc)})
-    def rejected(action):
-        try:
-            result = action()
-            return type(result) is dict and result.get('ok') is False
-        except (InputError, ValueError, KeyError, TypeError, RecursionError):
-            return True
-    upstream = {}
-    for name in ('answer', 'privacy', 'lifecycle'):
-        tests = bridge.c.modules[name].self_tests(bridge.c.engines[name])
-        upstream[name] = {'total': len(tests), 'passed': sum(t['passed'] for t in tests)}
-        for test in tests:
-            check('upstream/' + name + '/' + test['name'], lambda test=test: test['passed'] is True)
-    records = {key: bridge.run_case(key) for key in bridge.scenarios}
-    for key, record in records.items():
-        p, s = record['payload'], record['payload']['summary']
-        check(key + '/expected', lambda key=key, s=s: s['decision'] == bridge.scenarios[key]['expected'])
-        check(key + '/replay', lambda r=record: bridge.verify(r)['ok'])
-        check(key + '/supply_gate', lambda s=s: (s['answer_text'] is not None) == s['supplied'] == compose(s['observation'])['may_supply'])
-        check(key + '/no_external_ai', lambda p=p: p['scope']['external_ai_calls'] == 0 and p['summary']['external_ai_calls'] == 0)
-        check(key + '/stop_before_call', lambda p=p: p['summary']['send'] == 'PASS' or len(p['receiver_calls']) == 0)
-        check(key + '/not_run_not_pass', lambda s=s: s['send'] == 'PASS' or s['answer'] == NOT_RUN and s['output'] == NOT_RUN)
-        response, same_record = bridge.invoke({'inputs': {'scenario': key}})
-        check(key + '/protocol_shape', lambda response=response: set(response) == {'outputs'} and type(response['outputs']) is str)
-        normal_text = records['normal']['payload']['summary']['answer_text']
-        check(key + '/no_blocked_body', lambda s=s, response=response: s['supplied'] or normal_text not in response['outputs'])
-        for mutation in ('decision', 'wire', 'drop_event', 'event_result', 'state', 'scope'):
-            forged = copy.deepcopy(record)
-            q = forged['payload']
-            if mutation == 'decision': q['summary']['decision'] = 'REJECT' if s['decision'] == 'PASS' else 'PASS'
-            elif mutation == 'wire': q['wire']['applicant']['employees'] = 999
-            elif mutation == 'drop_event': q['events'].pop(0)
-            elif mutation == 'event_result': q['events'][0]['body']['data']['result']['decision'] = 'PASS' if q['events'][0]['body']['data']['result']['decision'] != 'PASS' else 'REJECT'
-            elif mutation == 'state': q['ledger']['pending'] = not q['ledger']['pending']
-            else: q['scope']['government_endorsement'] = True
-            # Rehash the entire changed chain: rejection must not rely on stale hashes alone.
-            previous = digest({'profile': PROFILE_HASH, 'scenario': key})
-            for index, ev in enumerate(q['events']):
-                ev['body']['sequence'] = index + 1
-                ev['body']['previous'] = previous
-                previous = digest(ev['body'])
-                ev['sha256'] = previous
-            forged['sha256'] = digest(q)
-            check(key + '/rehash_attack/' + mutation, lambda f=forged: rejected(lambda: bridge.verify(f)))
-    for key in ('unknown_delivery', 'unknown_after_retry'):
-        s = records[key]['payload']['summary']
-        check(key + '/consumption_retained', lambda s=s: s['used_units'] == 4 and s['pending'] and s['local_receiver_calls'] == 1 and not s['supplied'])
-    check('duplicate/no_second_call', lambda: records['duplicate']['payload']['summary']['local_receiver_calls'] == 1)
-    for key in ('copy_left', 'closed', 'stale_certificate'):
-        check(key + '/no_post_end_supply', lambda key=key: not records[key]['payload']['summary']['supplied'])
-    check('closed/certificate_is_not_read_permission', lambda: records['closed']['payload']['summary']['termination_confirmed'] and not records['closed']['payload']['summary']['supplied'])
-    check('model_policy_not_trusted', lambda: records['model_relaxes']['payload']['summary']['decision'] == 'REJECT')
-    check('approved_change_keeps_other_origin', lambda: records['approved_secondary']['payload']['summary']['observation']['origins_bound'])
-    # Alter the stored, accepted text and recompute all outer hashes.
-    forged = copy.deepcopy(records['normal'])
-    forged['payload']['lifecycle_state']['objects']['S']['text'] = 'unrelated answer'
-    forged['sha256'] = digest(forged['payload'])
-    check('different_managed_answer', lambda: rejected(lambda: bridge.verify(forged)))
-    invalid_json = ['{"a":1,"a":2}', '{"x":NaN}', '{"x":Infinity}', '{"x":-Infinity}', '{',
-                    '{"inputs":{"scenario":"normal","scenario":"closed"}}', '{"x":9007199254740992}']
-    for index, text in enumerate(invalid_json):
-        check('json/' + str(index), lambda text=text: rejected(lambda: parse_json(text)))
-    invalid_requests = [{}, [], None, {'inputs': None}, {'inputs': {'scenario': True}},
-                        {'inputs': {'scenario': 1}}, {'inputs': {'scenario': 'unknown'}},
-                        {'inputs': {'scenario': 'normal', 'policy': {'allow': True}}},
-                        {'inputs': {'scenario': 'normal'}, 'outputs': 'PASS'},
-                        {'inputs': {'scenario': '../cases.json'}}, {'inputs': {'scenario': ['normal']}}]
-    for index, body in enumerate(invalid_requests):
-        check('api/schema/' + str(index), lambda body=body: rejected(lambda: bridge.invoke(body)))
-    collection = bridge.all_records()
-    for mutation in ('drop', 'duplicate', 'reorder', 'source'):
-        changed = copy.deepcopy(collection)
-        if mutation == 'drop': changed['records'].pop()
-        elif mutation == 'duplicate': changed['records'].append(changed['records'][0])
-        elif mutation == 'reorder': changed['records'].reverse()
-        else: changed['source_binding']['version'] = 'forged'
-        check('collection/' + mutation, lambda changed=changed: rejected(lambda: bridge.verify_document(changed)))
-    count = 0
-    for observation in all_composition_inputs():
-        actual = compose(observation)
-        prerequisite = all(observation[k] == 'PASS' for k in ('send', 'output', 'answer'))
-        identity = all(observation[k] for k in ('same_request', 'same_answer', 'origins_bound'))
-        expected = {'may_register': prerequisite and identity,
-                    'may_supply': prerequisite and identity and observation['registered'] and observation['use'] == 'PASS' and observation['action_ok']}
-        require(actual == expected, 'Independent finite composition oracle mismatch')
-        count += 1
-    check('composition/exhaustive_8192', lambda: count == 8192)
-    for name, lock in bridge.cfg['upstream_files'].items():
-        check('unchanged_source/' + name, lambda name=name, lock=lock: filehash(ROOT / name) == lock['sha256'])
-    failures = [r for r in rows if not r['passed']]
-    return {'schema': 'gennai-civic-bridge-tests/1.0', 'total': len(rows),
-            'passed': len(rows) - len(failures), 'upstream': upstream,
-            'composition_inputs': count, 'failures': failures}
-
-
-def make_server(bridge: Bridge, port: int = 0, key: str | None = None, capture_dir: Path | None = None) -> ThreadingHTTPServer:
-    token = key or secrets.token_urlsafe(32)
-    require(type(token) is str and 24 <= len(token) <= 256, 'API key must be 24–256 characters')
-    class Handler(BaseHTTPRequestHandler):
-        protocol_version = 'HTTP/1.0'
-        server_version = 'CivicAssuranceReference/1.0'
-        def setup(self):
-            super().setup()
-            self.connection.settimeout(5)
-        def log_message(self, *args):
-            pass  # Do not log payloads, authorization headers, or private keys.
-        def respond(self, code, value, content_type='application/json; charset=utf-8'):
-            raw = value.encode('utf-8') if type(value) is str else canonical(value).encode('utf-8')
-            self.send_response(code)
-            self.send_header('Content-Type', content_type)
-            self.send_header('Content-Length', str(len(raw)))
-            self.send_header('Cache-Control', 'no-store')
-            self.send_header('X-Content-Type-Options', 'nosniff')
-            self.send_header('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
-            self.end_headers()
-            self.wfile.write(raw)
-        def trusted_origin(self):
-            host = self.headers.get('Host', '')
-            allowed = {f'127.0.0.1:{self.server.server_port}', f'localhost:{self.server.server_port}'}
-            origin = self.headers.get('Origin')
-            return host in allowed and (origin is None or origin == 'http://' + host)
-        def do_GET(self):
-            if not self.trusted_origin():
-                self.respond(403, {'error': 'Host or Origin is not permitted'}); return
-            if self.path == '/health':
-                self.respond(200, {'status': 'ok', 'mode': 'synthetic-reference', 'external_ai_calls': 0}); return
-            if self.path == '/registration.json':
-                self.respond(200, bridge.registration()); return
-            if self.path == '/README.md':
-                self.respond(200, (ROOT / 'README.md').read_text(encoding='utf-8'), 'text/plain; charset=utf-8'); return
-            if self.path in ('/', '/demo.html'):
-                page = (ROOT / 'demo.html').read_text(encoding='utf-8')
-                runtime = canonical({'mode': 'live-local', 'api_key': token})
-                page = re.sub(r'(<script id="runtime" type="application/json">).*?(</script>)',
-                              lambda match: match.group(1) + runtime + match.group(2), page, flags=re.S)
-                self.respond(200, page, 'text/html; charset=utf-8'); return
-            self.respond(404, {'error': 'Not found'})
-        def do_POST(self):
-            if not self.trusted_origin():
-                self.respond(403, {'error': 'Host or Origin is not permitted'}); return
-            supplied = self.headers.get('x-api-key', '')
-            if not hmac.compare_digest(supplied.encode('utf-8'), token.encode('utf-8')):
-                self.respond(401, {'error': 'Invalid API key'}); return
-            if self.path not in ('/invoke', '/demo-run'):
-                self.respond(404, {'error': 'Not found'}); return
-            if self.headers.get('Transfer-Encoding'):
-                self.respond(400, {'error': 'Chunked bodies are not supported'}); return
-            if self.headers.get_content_type() != 'application/json':
-                self.respond(415, {'error': 'Content-Type must be application/json'}); return
-            try:
-                value = self.headers.get('Content-Length', '')
-                require(value.isascii() and value.isdigit() and len(value) < 10, 'Content-Length required')
-                size = int(value)
-                if size > HTTP_MAX_BYTES:
-                    self.respond(413, {'error': 'Body too large'}); return
-                require(size > 0, 'Empty body')
-                self.connection.settimeout(5)
-                raw = self.rfile.read(size)
-                require(len(raw) == size, 'Incomplete body')
-                body = parse_json(raw.decode('utf-8'))
-                output, record = bridge.invoke(body)
-                if capture_dir is not None:
-                    write_json(capture_dir / ('record-' + uuid.uuid4().hex + '.json'), record)
-                self.respond(200, output if self.path == '/invoke' else {'response': output, 'record': record})
-            except (InputError, ValueError, UnicodeError, KeyError, TypeError, TimeoutError):
-                self.respond(400, {'error': 'Invalid or unsupported request; no successful decision is asserted'})
-            except Exception:
-                self.respond(500, {'error': 'Verification failed; no answer is released'})
-    server = ThreadingHTTPServer(('127.0.0.1', port), Handler)
-    server.bridge_token = token
-    return server
-
-
-def http_tests(bridge: Bridge) -> dict:
-    server = make_server(bridge)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    root = 'http://127.0.0.1:' + str(server.server_port)
-    rows = []
-    def call(path='/invoke', value=None, raw=None, token=True, extra=None, method='POST'):
-        payload = raw if raw is not None else canonical(value).encode('utf-8') if value is not None else b''
-        headers = {'Content-Type': 'application/json'}
-        if token: headers['x-api-key'] = server.bridge_token
-        headers.update(extra or {})
-        request = urllib.request.Request(root + path, data=payload if method == 'POST' else None, headers=headers, method=method)
-        try:
-            with urllib.request.urlopen(request, timeout=15) as result:
-                return result.status, result.read(), result.headers
-        except urllib.error.HTTPError as exc:
-            return exc.code, exc.read(), exc.headers
-    def check(name, success):
-        rows.append({'name': name, 'passed': bool(success)})
-    try:
-        for key in bridge.scenarios:
-            code, raw, headers = call(value={'inputs': {'scenario': key}})
-            actual = parse_json(raw.decode('utf-8'))
-            expected, _ = bridge.invoke({'inputs': {'scenario': key}})
-            check('sync/' + key, code == 200 and actual == expected and set(actual) == {'outputs'})
-        for name, args, expected in [
-            ('unauthenticated', {'value': {'inputs': {'scenario': 'normal'}}, 'token': False}, 401),
-            ('foreign-origin', {'value': {'inputs': {'scenario': 'normal'}}, 'extra': {'Origin': 'https://untrusted.invalid'}}, 403),
-            ('foreign-host', {'value': {'inputs': {'scenario': 'normal'}}, 'extra': {'Host': 'untrusted.invalid'}}, 403),
-            ('duplicate-keys', {'raw': b'{"inputs":{"scenario":"normal","scenario":"closed"}}'}, 400),
-            ('nan', {'raw': b'{"inputs":{"scenario":NaN}}'}, 400),
-            ('bad-utf8', {'raw': b'\xff'}, 400),
-            ('unknown-scenario', {'value': {'inputs': {'scenario': 'unknown'}}}, 400),
-            ('extra-fields', {'value': {'inputs': {'scenario': 'normal', 'force_pass': True}}}, 400),
-            ('array-body', {'value': []}, 400),
-            ('wrong-content-type', {'value': {'inputs': {'scenario': 'normal'}}, 'extra': {'Content-Type': 'text/plain'}}, 415),
-            ('oversized', {'raw': b' ' * (HTTP_MAX_BYTES + 1)}, 413),
-            ('unknown-route', {'path': '/unsafe', 'value': {'inputs': {'scenario': 'normal'}}}, 404),
-            ('no-file-serving', {'path': '/poc.py', 'method': 'GET'}, 404),
-            ('no-path-traversal', {'path': '/../cases.json', 'method': 'GET'}, 404),
-        ]:
-            code, _, _ = call(**args)
-            check(name, code == expected)
-        code, raw, _ = call('/registration.json', method='GET')
-        check('registration', code == 200 and parse_json(raw.decode()) == bridge.registration())
-        code, raw, _ = call('/README.md', method='GET')
-        check('documentation', code == 200 and raw.decode('utf-8') == (ROOT / 'README.md').read_text(encoding='utf-8'))
-        code, raw, _ = call('/demo-run', value={'inputs': {'scenario': 'normal'}})
-        result = parse_json(raw.decode('utf-8'))
-        check('demo-record-replay', code == 200 and bridge.verify(result['record'])['ok'])
-    finally:
-        server.shutdown(); server.server_close(); thread.join(timeout=5)
-    failures = [r for r in rows if not r['passed']]
-    return {'total': len(rows), 'passed': len(rows) - len(failures), 'failures': failures,
-            'scope': 'real localhost HTTP, synthetic generator; no deployed Gennai OSS environment'}
-
-
-def snapshot_rows(bridge: Bridge, evidence: dict) -> dict:
-    rows = []
-    for record in evidence['records']:
-        p = record['payload']
-        checks, timeline = [], []
-        for event in p['events']:
-            body = event['body']
-            data = body['data']
-            result = data.get('result', {})
-            checks.extend(copy.deepcopy(result.get('checks', [])))
-            timeline.append({'kind': body['kind'], 'operation': data.get('command', {}).get('op', ''),
-                             'status': result.get('decision', result.get('status', ''))})
-        rows.append({'key': p['scenario'], 'label': p['label'], 'summary': p['summary'],
-                     'hash': record['sha256'], 'note': bridge.scenarios[p['scenario']]['note'],
-                     'checks': checks, 'timeline': timeline})
-    return {'records': rows}
-
-
-def update_snapshot(bridge: Bridge, evidence: dict, path: Path) -> None:
-    page = (ROOT / 'demo.html').read_text(encoding='utf-8')
-    embedded = canonical(snapshot_rows(bridge, evidence)).replace('<', '\\u003c').replace('&', '\\u0026')
-    page, count = re.subn(r'(<script id="snapshot" type="application/json">).*?(</script>)',
-                         lambda match: match.group(1) + embedded + match.group(2), page, flags=re.S)
-    require(count == 1, 'Snapshot slot not found')
-    if path.resolve() != (ROOT / 'demo.html').resolve():
-        try:
-            readme_href = Path(os.path.relpath(ROOT / 'README.md', path.parent)).as_posix()
-        except ValueError:
-            readme_href = (ROOT / 'README.md').as_uri()
-        page = page.replace('href="README.md"', 'href="' + html.escape(readme_href, quote=True) + '"')
-    path.write_text(page, encoding='utf-8', newline='\n')
-
-
-def verify_snapshot(bridge: Bridge, evidence: dict) -> bool:
-    page = (ROOT / 'demo.html').read_text(encoding='utf-8')
-    found = re.search(r'<script id="snapshot" type="application/json">(.*?)</script>', page, re.S)
-    require(found is not None, 'Missing browser snapshot')
-    return parse_json(found.group(1)) == snapshot_rows(bridge, evidence)
-
-
-def node_tests(bridge: Bridge) -> dict:
-    require(shutil.which('node') is not None, 'Node.js required; test is NOT checked')
-    page = (ROOT / 'demo.html').read_text(encoding='utf-8')
-    match = re.search(r'<script id="gate-model">(.*?)</script>', page, re.S)
-    require(match is not None, 'Missing independent browser composition model')
-    inputs = list(all_composition_inputs())
-    inputs += [bridge.run_case(key)['payload']['summary']['observation'] for key in bridge.scenarios]
-    code = match.group(1) + "\nconst fs=require('fs');const rows=JSON.parse(fs.readFileSync(0,'utf8'));process.stdout.write(JSON.stringify(rows.map(composeModel)));\n"
-    result = subprocess.run(['node', '-e', code], input=canonical(inputs), capture_output=True,
-                            encoding='utf-8', timeout=45, check=True)
-    actual = parse_json(result.stdout)
-    expected = [compose(o) for o in inputs]
-    require(actual == expected, 'Python/JavaScript composition mismatch')
-    return {'inputs': len(inputs), 'matched': len(inputs), 'scope': 'composition model; not complete independent execution of all three upstream engines'}
-
-
-def browser_tests(bridge: Bridge, screenshots: Path | None = None, snapshot_only: bool = False) -> dict:
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError as exc:
-        raise InputError('Playwright is required for browser-test; not checked') from exc
-    server = make_server(bridge)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    errors, checks = [], 0
-    try:
-        with sync_playwright() as playwright:
-            executable = None if Path(playwright.chromium.executable_path).is_file() else shutil.which('chromium')
-            browser = playwright.chromium.launch(headless=True, args=['--no-sandbox'], executable_path=executable)
-            page = browser.new_page(viewport={'width': 1440, 'height': 1150}, device_scale_factor=1)
-            page.on('pageerror', lambda error: errors.append(str(error)))
-            if snapshot_only:
-                page.set_content((ROOT / 'demo.html').read_text(encoding='utf-8'), wait_until='load')
+def apply_changes(value: dict[str, Any], changes: dict[str, Any]) -> dict[str, Any]:
+    """既存の入力項目だけを置換。コード実行・外部参照・任意ファイル参照はしない。"""
+    require(type(changes) is dict, "changesはオブジェクトで指定してください。")
+    paths = list(changes)
+    require(all(type(p) is str and p for p in paths), "変更パスが不正です。")
+    require(not any(a != b and b.startswith(a + ".") for a in paths for b in paths), "親項目と子項目の重複した変更は指定できません。")
+    result = copy.deepcopy(value)
+    for path, new_value in changes.items():
+        current: Any = result
+        parts = path.split(".")
+        for i, part in enumerate(parts):
+            if type(current) is list:
+                require(part.isascii() and part.isdigit() and int(part) < len(current), f"存在しない配列パスです：{path}")
+                key: Any = int(part)
             else:
-                page.goto('http://127.0.0.1:' + str(server.server_port), wait_until='networkidle')
-            for key, scene in bridge.scenarios.items():
-                page.select_option('#scenario', key)
-                page.wait_for_function("([name]) => document.querySelector('#caseTitle').textContent===name && !document.querySelector('#run').disabled", arg=[scene['label']])
-                require(not page.is_visible('#error'), 'Browser error shown: ' + key)
-                require(page.inner_text('#decision') == scene['expected'], 'Wrong browser decision: ' + key)
-                expected = bridge.run_case(key)['payload']['summary']
-                require(page.is_visible('#answerText') == expected['supplied'], 'Browser released blocked answer: ' + key)
-                if expected['supplied']:
-                    require(page.inner_text('#answerText') == expected['answer_text'], 'Browser text differs from checked text')
-                checks += 1
-            page.select_option('#scenario', 'normal')
-            page.wait_for_function("document.querySelector('#caseTitle').textContent==='必要項目だけで回答案を使う' && !document.querySelector('#run').disabled")
-            if screenshots:
-                screenshots.mkdir(parents=True, exist_ok=True)
-                page.screenshot(path=str(screenshots / 'desktop.png'), full_page=True)
-            for width in (390, 768, 1440):
-                page.set_viewport_size({'width': width, 'height': 1050})
-                require(page.evaluate('document.documentElement.scrollWidth <= innerWidth'), 'Horizontal overflow at ' + str(width))
-                checks += 1
-                if screenshots and width == 390:
-                    page.screenshot(path=str(screenshots / 'mobile.png'), full_page=True)
-            # The file:// presentation is a saved-record viewer, not a simulated live run.
-            offline = browser.new_page(viewport={'width': 1280, 'height': 1000})
-            offline.on('pageerror', lambda error: errors.append(str(error)))
-            offline.set_content((ROOT / 'demo.html').read_text(encoding='utf-8'), wait_until='load')
-            offline.select_option('#scenario', 'closed')
-            require(offline.inner_text('#mode') == '保存済み実行記録', 'Snapshot mislabeled as live')
-            require(not offline.is_visible('#answerText') and offline.inner_text('#decision') == 'PASS', 'Termination snapshot leaked text')
-            checks += 1
-            require(not errors, 'Browser script error: ' + '; '.join(errors))
-            browser.close()
-    finally:
-        server.shutdown(); server.server_close(); thread.join(timeout=5)
-    return {'checks': checks, 'passed': checks, 'script_errors': errors,
-            'mode': 'snapshot-only' if snapshot_only else 'live-local-and-snapshot',
-            'live_bridge_ui_checked': not snapshot_only,
-            'scope': 'our bridge display; not official Gennai OSS UI'}
+                require(type(current) is dict and part in current, f"存在しない変更パスです：{path}")
+                key = part
+            if i == len(parts) - 1:
+                current[key] = copy.deepcopy(new_value)
+            else:
+                current = current[key]
+    return result
 
 
-def lean_observation(o: dict) -> str:
-    fields = [('send', 'send'), ('output', 'output'), ('answer', 'answer'),
-              ('sameRequest', 'same_request'), ('sameAnswer', 'same_answer'),
-              ('originsBound', 'origins_bound'), ('registered', 'registered'),
-              ('use', 'use'), ('actionOk', 'action_ok')]
-    def value(v):
-        return ('true' if v else 'false') if type(v) is bool else '.' + v
-    return '({ ' + ', '.join(a + ' := ' + value(o[b]) for a, b in fields) + ' } : CivicBridge.Observation)'
+class Engine:
+    """業務要求パケットを信頼基準に、要求→主張→資料→判定を対応付ける。"""
+
+    def __init__(self, data: dict[str, Any]):
+        validate_json_tree(data)
+        require(type(data) is dict and data.get("schema") == "civic-poc-cases/1.0", "cases.jsonのスキーマが不正です。")
+        check_keys(data, {"schema", "metadata", "requirements", "source_catalog", "claim_metadata",
+                          "base_input", "scenarios", "tests", "completions"}, "cases.json")
+        anchor = {k: data[k] for k in ("requirements", "source_catalog", "claim_metadata")}
+        require(digest(anchor) == REFERENCE_SHA256, "採用対象の要求・資料・主張定義が固定参照値と一致しません。入力だけの変更とは区別して、仕様をレビューしてください。")
+        self.data = copy.deepcopy(data)
+        self.policy = self.data["requirements"]
+        self.catalog = {s["id"]: s for s in self.data["source_catalog"]}
+        self.meta = self.data["claim_metadata"]
+        self.policy_hash = digest(self.policy)
+        self.catalog_hashes = {key: digest(s) for key, s in self.catalog.items()}
+        self.names = {c["id"]: c["name"] for c in self.policy["criteria"]}
+        for group in ("scenarios", "tests"):
+            entries = self.data[group]
+            require(type(entries) is list and 0 < len(entries) <= 200, f"{group}の件数が不正です。")
+            seen: set[str] = set()
+            for entry in entries:
+                check_keys(entry, {"key", "label", "expected", "changes"}, group)
+                string(entry["key"], group + ".key", 80)
+                require(entry["key"] not in seen and entry["expected"] in STATUSES, f"{group}のキー重複または期待値不正です。")
+                seen.add(entry["key"])
+                string(entry["label"], group + ".label")
+        self.base()  # 起動時に基準入力も検査する。
+
+    def validate_input(self, x: Any) -> None:
+        validate_json_tree(x)
+        check_keys(x, {"id", "label", "as_of", "target", "applicant", "source_ids", "sources", "data_policy", "workflow", "candidate", "note", "question", "resolution_log"}, "evaluation_input")
+        for key in ("id", "label", "note", "question"):
+            string(x[key], key, 20000)
+        iso_date(x["as_of"], "as_of")
+        check_keys(x["target"], {"municipality", "program_id"}, "target")
+        for key, value in x["target"].items():
+            string(value, "target." + key)
+        a = x["applicant"]
+        check_keys(a, {"id", "label", "synthetic", "establishment", "employees", "tax_arrears", "duplicate"}, "applicant")
+        string(a["id"], "applicant.id")
+        string(a["label"], "applicant.label")
+        require(type(a["synthetic"]) is bool, "applicant.syntheticは真偽値にしてください。")
+        require(a["employees"] is None or (type(a["employees"]) is int and a["employees"] >= 0), "従業員数は0以上の整数またはnullにしてください。")
+        for key in ("establishment", "tax_arrears", "duplicate"):
+            require(a[key] is None or type(a[key]) is bool, f"applicant.{key}は真偽値またはnullにしてください。")
+        for key in ("sources", "source_ids"):
+            require(type(x[key]) is list and len(x[key]) <= 10, f"{key}は10件以下の配列にしてください。")
+        for key in x["source_ids"]:
+            string(key, "source_idsの要素")
+        require(len(x["source_ids"]) == len(set(x["source_ids"])), "参照資料IDが重複しています。")
+        source_ids: set[str] = set()
+        for s in x["sources"]:
+            check_keys(s, {"id", "title", "version", "year", "municipality", "program_id", "published_at", "valid_from", "valid_to", "classification", "facts", "sections", "text"}, "sourcesの要素")
+            for key in ("id", "title", "version", "municipality", "program_id", "classification", "text"):
+                string(s[key], "source." + key, 20000)
+            require(s["id"] not in source_ids, "資料スナップショットのIDが重複しています。")
+            source_ids.add(s["id"])
+            require(type(s["year"]) is int and 1 <= s["year"] <= 9999, "資料の年度が不正です。")
+            for key in ("published_at", "valid_from", "valid_to"):
+                iso_date(s[key], "source." + key)
+            require(s["valid_from"] <= s["valid_to"], "資料の有効期間が逆転しています。")
+            require(type(s["facts"]) is dict and type(s["sections"]) is dict, "資料のfacts・sectionsはオブジェクトにしてください。")
+            # 欠落／誤型の資料を期待値として計算に流さない。内容の変更はR08で検出。
+            if s["id"] in self.catalog:
+                ref = self.catalog[s["id"]]
+                require(set(s["facts"]) == set(ref["facts"]), "資料の構造化項目が欠落または過剰です。")
+                for key, ref_value in ref["facts"].items():
+                    val = s["facts"][key]
+                    if type(ref_value) in (float, int) and type(ref_value) is not bool:
+                        require(type(val) in (int, float), f"資料項目{key}の数値型が不正です。")
+                    else:
+                        require(type(val) is type(ref_value), f"資料項目{key}の型が不正です。")
+                if "deadline" in s["facts"]:
+                    iso_date(s["facts"]["deadline"], "facts.deadline")
+            for key, value in s["sections"].items():
+                string(value, "sections." + key)
+        check_keys(x["data_policy"], {"classification", "template_only", "network"}, "data_policy")
+        string(x["data_policy"]["classification"], "data_policy.classification")
+        string(x["data_policy"]["network"], "data_policy.network")
+        require(type(x["data_policy"]["template_only"]) is bool, "template_onlyの型が不正です。")
+        check_keys(x["workflow"], {"use", "human_confirmation", "external_send", "automatic_award"}, "workflow")
+        string(x["workflow"]["use"], "workflow.use")
+        for key in ("human_confirmation", "external_send", "automatic_award"):
+            require(type(x["workflow"][key]) is bool, f"workflow.{key}の型が不正です。")
+        check_keys(x["candidate"], {"program_id", "claims", "text"}, "candidate")
+        string(x["candidate"]["program_id"], "candidate.program_id")
+        string(x["candidate"]["text"], "candidate.text", 20000)
+        claims = x["candidate"]["claims"]
+        check_keys(claims, set(self.meta), "claims")
+        for key, claim in claims.items():
+            check_keys(claim, {"value", "source_id", "section", "source_hash"}, "claim." + key)
+            string(claim["source_id"], key + ".source_id", nullable=True)
+            string(claim["section"], key + ".section", nullable=True)
+            require(claim["source_hash"] is None or (type(claim["source_hash"]) is str and re.fullmatch("[0-9a-f]{64}", claim["source_hash"]) is not None), f"{key}の参照ハッシュが不正です。")
+        values = {k: v["value"] for k, v in claims.items()}
+        string(values["municipality"], "claims.municipality")
+        require(type(values["max_yen"]) is int and values["max_yen"] >= 0, "上限金額は0以上の整数にしてください。")
+        require(type(values["rate"]) in (int, float) and 0 <= values["rate"] <= 1, "補助率は0～1の数値にしてください。")
+        iso_date(values["deadline"], "claims.deadline")
+        require(type(values["eligibility"]) is str and values["eligibility"] in {"candidate", "out_of_scope", "needs_review"}, "対象候補区分が不正です。")
+        require(type(values["award_guarantee"]) is bool, "award_guaranteeは真偽値にしてください。")
+        conditions = values["conditions"]
+        require(type(conditions) is list and len(conditions) <= 20 and all(type(v) is str for v in conditions), "必須条件は文字列配列にしてください。")
+        require(len(conditions) == len(set(conditions)), "必須条件の識別子が重複しています。")
+        require(type(x["resolution_log"]) is list and len(x["resolution_log"]) <= 100, "補完履歴の形式が不正です。")
+        for entry in x["resolution_log"]:
+            require(type(entry) is dict and type(entry.get("prior_packet_id")) is str and re.fullmatch("RIP-DEMO-[0-9A-F]{12}", entry["prior_packet_id"]) is not None, "補完履歴に正しい前件パケットIDが必要です。")
+            require(entry.get("prior_decision") == "HOLD" and type(entry.get("change")) is dict, "補完履歴の変更情報が不正です。")
+            string(entry.get("source"), "resolution_log.source")
+
+    def base(self) -> dict[str, Any]:
+        x = copy.deepcopy(self.data["base_input"])
+        x["sources"] = copy.deepcopy(self.data["source_catalog"])
+        # build_textに渡す前に、候補値の形を検査する。
+        x["candidate"]["text"] = "テンプレート生成前"
+        self.validate_input(x)
+        x["candidate"]["text"] = build_text(x["candidate"]["claims"])
+        return x
+
+    def input_from(self, entry: dict[str, Any]) -> dict[str, Any]:
+        x = apply_changes(self.base(), entry["changes"])
+        self.validate_input(x)
+        if "candidate.text" not in entry["changes"] and "candidate" not in entry["changes"]:
+            x["candidate"]["text"] = build_text(x["candidate"]["claims"])
+        return x
+
+    def scenario(self, key: str) -> dict[str, Any]:
+        for item in self.data["scenarios"]:
+            if key in (item["key"], item["changes"].get("id", self.data["base_input"]["id"])):
+                return item
+        raise InputError("ケース名が見つかりません：" + key)
+
+    def eligibility(self, app: dict[str, Any]) -> str:
+        limit = self.catalog["SRC-01"]["facts"]["employee_limit"]
+        if (app["establishment"] is False or (type(app["employees"]) is int and app["employees"] > limit)
+                or app["tax_arrears"] is True or app["duplicate"] is True):
+            return "out_of_scope"
+        if any(app[k] is None for k in ("establishment", "employees", "tax_arrears", "duplicate")):
+            return "needs_review"
+        return "candidate"
+
+    def evaluate(self, x: dict[str, Any]) -> dict[str, Any]:
+        self.validate_input(x)
+        c, checks, trace = x["candidate"]["claims"], [], []
+        sources = {s["id"]: s for s in x["sources"]}
+        source_hashes = {key: digest(s) for key, s in sources.items()}
+        for key, meta in self.meta.items():
+            cl = c[key]
+            status, detail = "PASS", ""
+            source = sources.get(cl["source_id"])
+            if not cl["source_id"] or not cl["section"]:
+                status, detail = "HOLD", "この主張と資料の該当項目との対応が未登録です。"
+            elif cl["source_id"] not in x["source_ids"] or source is None:
+                status, detail = "HOLD", "参照する資料のスナップショットが不足しています。"
+            elif cl["source_id"] != meta["source"] or cl["section"] != meta["section"] or not source["sections"].get(cl["section"]):
+                status, detail = "REJECT", "主張に指定された資料・参照箇所が検査対象と一致しません。"
+            else:
+                expected = self.eligibility(x["applicant"]) if key == "eligibility" else source["facts"]["mandatory_conditions"] if key == "conditions" else source["facts"][key]
+                matches = (isinstance(expected, list) and all(v in cl["value"] for v in expected) and all(v in expected for v in cl["value"])) if key == "conditions" else same(cl["value"], expected)
+                if not matches:
+                    status = "REJECT"
+                    detail = f"資料・条件の値「{value_label(key, expected)}」と回答の値「{value_label(key, cl['value'])}」が一致しません。"
+                elif key == "eligibility" and expected == "needs_review":
+                    status, detail = "HOLD", "必要な相談者条件が未確認です。資料だけでは対象候補と確認できません。"
+                elif key == "eligibility":
+                    detail = "入力上の対象外条件と、対象外という案内が一致しています。受給審査ではありません。" if expected == "out_of_scope" else "合成入力の条件と募集要領の対象条件が対応しています。受給資格は確定しません。"
+                elif key == "conditions":
+                    detail = "案内に必要な5条件が構造化主張に含まれます。"
+                elif key == "award_guarantee":
+                    detail = "受給・採択を断定せず、正式な申請・審査を要する旨と一致します。"
+                else:
+                    detail = f"参照項目の値「{value_label(key, expected)}」と、構造化された回答の値が一致します。"
+            trace.append({"key": key, "label": meta["label"], "value": cl["value"], "source_id": cl["source_id"], "section": cl["section"], "status": status, "detail": detail})
+
+        def add(key: str, status: str, detail: str) -> None:
+            checks.append({"id": key, "name": self.names[key], "status": status, "detail": detail})
+
+        target_ok = (same(x["target"], self.policy["target"]) and x["candidate"]["program_id"] == x["target"]["program_id"] and c["municipality"]["value"] == x["target"]["municipality"])
+        bad_sources = any(s["id"] in x["source_ids"] and (s["municipality"] != x["target"]["municipality"] or s["program_id"] != x["target"]["program_id"]) for s in x["sources"])
+        target_ok = target_ok and not bad_sources
+        add("R01", "PASS" if target_ok else "REJECT", "自治体X・指定制度と、回答および参照資料の対象が一致。" if target_ok else "依頼された自治体・制度と、回答または参照資料の対象が不一致。")
+        current = []
+        for key in x["source_ids"]:
+            s, ref = sources.get(key), self.catalog.get(key)
+            if s is None:
+                current.append("HOLD")
+            else:
+                current.append("REJECT" if ref is None or s["version"] != ref["version"] or s["year"] != ref["year"] or x["as_of"] < s["valid_from"] or x["as_of"] > s["valid_to"] else "PASS")
+        if "SRC-01" not in x["source_ids"]:
+            current.append("HOLD")
+        freshness = worst(current)
+        add("R02", freshness, f"基準日 {x['as_of'].replace('-', '/')} は募集期間内。採用対象の資料版と一致。" if freshness == "PASS" else "対象資料が足りないため、版・募集期間を確認できません。" if freshness == "HOLD" else "基準日時点で募集期間外、または採用対象の資料版・年度と不一致。")
+        missing = {"establishment": "事業所", "employees": "従業員数", "tax_arrears": "市税滞納", "duplicate": "重複補助"}
+        missing_names = [label for key, label in missing.items() if x["applicant"][key] is None]
+        eligible = self.eligibility(x["applicant"])
+        condition_status = "HOLD" if missing_names else "PASS" if eligible == c["eligibility"]["value"] else "REJECT"
+        add("R03", condition_status, "・".join(missing_names) + "が未確認。相談者条件を補うまで採用を保留。" if condition_status == "HOLD" else "相談条件から導かれる対象区分と、回答中の案内が不一致。" if condition_status == "REJECT" else "対象外となる入力条件を、回答でも対象外として案内。" if eligible == "out_of_scope" else "事業所・従業員数・滞納・重複補助の合成条件と案内が一致。")
+        trace_status = worst([t["status"] for t in trace])
+        details = "／".join(t["label"] + ("：根拠または入力不足" if t["status"] == "HOLD" else "：根拠と不一致") for t in trace if t["status"] != "PASS")
+        add("R04", trace_status, "7つの構造化主張を、資料の該当項目と対応付けて照合。" if trace_status == "PASS" else details)
+        mandatory_ok = all(k in c["conditions"]["value"] for k in self.policy["mandatory_conditions"]) and c["award_guarantee"]["value"] is False
+        add("R05", "PASS" if mandatory_ok else "REJECT", "必須条件を明記。受給・採択は正式な審査による旨を表示。" if mandatory_ok else "必須条件が欠落、または受給・採択を確定したように表現。")
+        dp = x["data_policy"]
+        data_ok = x["applicant"]["synthetic"] is True and dp["classification"] == self.policy["allowed_data"] and dp["template_only"] is True and dp["network"] == "none" and all(s["classification"] == "public_sample" for s in x["sources"])
+        add("R06", "PASS" if data_ok else "REJECT", "同梱の架空資料・合成入力と、外部通信なしの設定を確認。" if data_ok else "データ区分または処理設定が「公開サンプル＋合成入力」の範囲外。")
+        w = x["workflow"]
+        gate_ok = w["use"] == self.policy["permitted_use"] and w["human_confirmation"] is True and w["external_send"] is False and w["automatic_award"] is False
+        add("R07", "PASS" if gate_ok else "REJECT", "職員の回答案確認に限定。対外自動送信・受給自動決定を許可しない。" if gate_ok else "職員確認の欠落、対外自動送信、または受給自動決定の設定が存在。")
+        bindings = []
+        for key in x["source_ids"]:
+            bindings.append("HOLD" if key not in sources else "PASS" if self.catalog_hashes.get(key) == source_hashes[key] else "REJECT")
+        for cl in c.values():
+            bindings.append("HOLD" if not cl["source_id"] or not cl["source_hash"] or cl["source_id"] not in source_hashes else "PASS" if cl["source_hash"] == source_hashes[cl["source_id"]] else "REJECT")
+        if x["candidate"]["text"] != build_text(c):
+            bindings.append("REJECT")
+        integrity = worst(bindings)
+        add("R08", integrity, "資料の内容識別値・主張の参照・テンプレート表示文が一致。" if integrity == "PASS" else "資料や参照識別値が足りず、結合した証拠の同一性を確認できません。" if integrity == "HOLD" else "採用対象資料の内容、主張の参照識別値、または表示文に不一致。")
+        return {"decision": worst([c["status"] for c in checks]), "checks": checks, "trace": trace, "source_hashes": source_hashes}
+
+    @staticmethod
+    def verification(result: dict[str, Any]) -> dict[str, Any]:
+        return {"decision": result["decision"], "permitted_action": "staff_review_of_answer_draft" if result["decision"] == "PASS" else "none", "checks": result["checks"], "claim_evidence": result["trace"], "source_sha256": result["source_hashes"]}
+
+    @staticmethod
+    def unresolved(result: dict[str, Any]) -> list[dict[str, Any]]:
+        return [{"requirement": c["id"], "status": c["status"], "reason": c["detail"]} for c in result["checks"] if c["status"] != "PASS"]
+
+    def packet(self, x: dict[str, Any]) -> dict[str, Any]:
+        result = self.evaluate(x)  # 呼出元の申告した判定は使わず、必ず入力から計算する。
+        payload = {
+            "schema": PACKET_SCHEMA, "demo_only": True, "case_id": x["id"],
+            "local_execution_time": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"), "time_attestation": "none",
+            "requirements": {"id": self.policy["id"], "version": self.policy["version"], "sha256": self.policy_hash, "specification": copy.deepcopy(self.policy)},
+            "evaluation_input": copy.deepcopy(x), "verification": self.verification(result), "unresolved": self.unresolved(result),
+            "scope": copy.deepcopy(SCOPE), "nonclaims": list(NONCLAIMS),
+        }
+        return seal(payload)
+
+    def verify(self, packet: Any) -> dict[str, Any]:
+        """採用判定と再検証成否を区別。HOLD/REJECTも正しい記録なら再現成立。"""
+        validate_json_tree(packet)
+        check_keys(packet, {"packet_id", "payload", "integrity"}, "packet")
+        p, i = packet["payload"], packet["integrity"]
+        check_keys(p, {"schema", "demo_only", "case_id", "local_execution_time", "time_attestation", "requirements", "evaluation_input", "verification", "unresolved", "scope", "nonclaims"}, "payload")
+        check_keys(i, {"algorithm", "canonicalization", "sha256", "issuer_signature"}, "integrity")
+        require(p["schema"] == PACKET_SCHEMA and p["demo_only"] is True, "対応するデモ用パケットではありません。")
+        self.validate_input(p["evaluation_input"])
+        result = self.evaluate(p["evaluation_input"])
+        calculated = digest(p)
+        intact = i["sha256"] == calculated and packet["packet_id"] == "RIP-DEMO-" + calculated[:12].upper()
+        req = p["requirements"]
+        expected_req = {"id": self.policy["id"], "version": self.policy["version"], "sha256": self.policy_hash, "specification": self.policy}
+        policy_match = same(req, expected_req)
+        outcome_match = same(p["verification"], self.verification(result))
+        try:
+            timestamp = p["local_execution_time"]
+            time_ok = type(timestamp) is str and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z", timestamp) is not None
+            if time_ok:
+                datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            time_ok = False
+        metadata_match = (p["case_id"] == p["evaluation_input"]["id"] and p["time_attestation"] == "none" and time_ok
+                          and same(p["unresolved"], self.unresolved(result)) and same(p["scope"], SCOPE) and same(p["nonclaims"], NONCLAIMS)
+                          and i["algorithm"] == "SHA-256" and i["canonicalization"] == CANONICALIZATION and i["issuer_signature"] is None)
+        return {"ok": intact and policy_match and outcome_match and metadata_match, "intact": intact,
+                "policy_match": policy_match, "outcome_match": outcome_match, "metadata_match": metadata_match,
+                "recomputed_decision": result["decision"], "history_link": "recorded_not_authenticated" if p["evaluation_input"]["resolution_log"] else "none",
+                "note": "同じ参照仕様による再計算。発行者・時刻・資料の真正性の認証ではありません。"}
+
+    def complete(self, key: str, prior: dict[str, Any]) -> dict[str, Any]:
+        require(self.verify(prior)["ok"], "前件の再検証が成立していません。")
+        require(prior["payload"]["verification"]["decision"] == "HOLD", "補完はHOLDの記録だけを対象とします。")
+        require(key in self.data["completions"], "このケースには定義済みの合成補完がありません。")
+        scenario = self.scenario(key)
+        require(same(prior["payload"]["evaluation_input"], self.input_from(scenario)), "補完対象が元の代表ケースと一致しません。")
+        definition = self.data["completions"][key]
+        check_keys(definition, {"changes", "log"}, "completion")
+        x = apply_changes(prior["payload"]["evaluation_input"], definition["changes"])
+        entry = {"prior_packet_id": prior["packet_id"], **copy.deepcopy(definition["log"])}
+        x["resolution_log"].append(entry)
+        self.validate_input(x)
+        x["candidate"]["text"] = build_text(x["candidate"]["claims"])
+        return x
 
 
-def lean_checks(bridge: Bridge) -> dict:
-    require(shutil.which('lake') is not None, 'Lean/Lake is not installed here. Formal checking NOT executed; no success is claimed.')
-    require(shutil.which('lean') is not None, 'Lean is required')
-    version = subprocess.run(['lake', 'env', 'lean', '--version'], cwd=ROOT, capture_output=True,
-                             encoding='utf-8', check=True, timeout=90)
-    require('4.19.0' in version.stdout, 'Use the fixed Lean 4.19.0 toolchain')
-    build = subprocess.run(['lake', 'build'], cwd=ROOT, capture_output=True, encoding='utf-8', timeout=600)
-    require(build.returncode == 0, 'Lean build failed:\n' + (build.stdout + build.stderr)[-20000:])
-    audit = subprocess.run(['lake', 'env', 'lean', 'CivicBridge.lean'], cwd=ROOT, capture_output=True,
-                           encoding='utf-8', timeout=180)
-    require(audit.returncode == 0, 'Lean axiom audit failed:\n' + (audit.stdout + audit.stderr)[-20000:])
-    log = audit.stdout + audit.stderr
-    theorem_names = re.findall(r'^theorem\s+(\w+)', (ROOT / 'CivicBridge.lean').read_text(encoding='utf-8'), re.M)
-    require(len(theorem_names) == 18 and all('CivicBridge.' + name in log for name in theorem_names),
-            'Missing named-theorem dependency reports')
-    require(not any(word in log for word in ('sorryAx', 'Lean.ofReduceBool', 'Lean.trustCompiler')), 'Untrusted proof dependency')
-    for group in re.findall(r'depends on axioms:\s*\[([^\]]*)\]', log, re.S):
-        names = {v.strip() for v in group.split(',') if v.strip()}
-        require(names <= {'propext', 'Classical.choice', 'Quot.sound'}, 'Unexpected axiom dependencies: ' + str(names))
-    observations = list(all_composition_inputs())
-    observations += [bridge.run_case(key)['payload']['summary']['observation'] for key in bridge.scenarios]
-    with tempfile.TemporaryDirectory(prefix='civic-bridge-lean-') as directory:
-        for offset in range(0, len(observations), 256):
-            lines = ['import CivicBridge', 'set_option autoImplicit false', 'set_option warningAsError true']
-            for obs in observations[offset:offset + 256]:
-                expected = compose(obs)
-                reg = 'true' if expected['may_register'] else 'false'
-                supply = 'true' if expected['may_supply'] else 'false'
-                value = lean_observation(obs)
-                lines.append(f'example : CivicBridge.mayRegister {value} = {reg} := by decide')
-                lines.append(f'example : CivicBridge.maySupply {value} = {supply} := by decide')
-            path = Path(directory) / 'Concrete.lean'
-            path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
-            result = subprocess.run(['lake', 'env', 'lean', str(path)], cwd=ROOT,
-                                    capture_output=True, encoding='utf-8', timeout=180)
-            require(result.returncode == 0, 'Lean concrete-input check failed:\n' + (result.stdout + result.stderr)[-12000:])
-    return {'lean_checked': True, 'version': '4.19.0', 'integration_theorems': len(theorem_names),
-            'concrete_inputs': len(observations), 'upstream_models': 'built unchanged', 'axiom_audit': 'passed'}
+def seal(payload: dict[str, Any]) -> dict[str, Any]:
+    """内容ハッシュの付与。電子署名ではなく、第三者が同じ関数を実行できる。"""
+    payload = copy.deepcopy(payload)
+    value = digest(payload)
+    return {"packet_id": "RIP-DEMO-" + value[:12].upper(), "payload": payload,
+            "integrity": {"algorithm": "SHA-256", "canonicalization": CANONICALIZATION, "sha256": value, "issuer_signature": None}}
 
 
-def assert_success(report: dict, kind: str):
-    if 'passed' in report:
-        total = report.get('total', report.get('checks'))
-        require(report['passed'] == total and not report.get('failures'), kind + ' failed: ' + canonical(report))
+def self_tests(engine: Engine) -> list[dict[str, Any]]:
+    """同じファイルに回帰・不正入力・変更検出テストを同梱。実AI評価ではない。"""
+    rows: list[dict[str, Any]] = []
+
+    def check(name: str, action: Callable[[], bool]) -> None:
+        try:
+            ok = action() is True
+            rows.append({"name": name, "passed": ok, "detail": "OK" if ok else "期待を満たしませんでした。"})
+        except Exception as exc:
+            rows.append({"name": name, "passed": False, "detail": f"{type(exc).__name__}: {exc}"})
+
+    def invalid_input(changes: dict[str, Any]) -> bool:
+        try:
+            engine.evaluate(apply_changes(engine.base(), changes))
+        except InputError:
+            return True
+        return False
+
+    def invalid_json(text: str) -> bool:
+        try:
+            parse_json(text)
+        except InputError:
+            return True
+        return False
+
+    base_packet = engine.packet(engine.base())
+
+    def blocked_packet(changes: dict[str, Any], rehash: bool = True) -> bool:
+        value = apply_changes(base_packet, changes)
+        if rehash:
+            updated = seal(value["payload"])
+            value["packet_id"] = updated["packet_id"]
+            value["integrity"]["sha256"] = updated["integrity"]["sha256"]
+        try:
+            return engine.verify(value)["ok"] is False
+        except InputError:
+            return True
+
+    for group in ("scenarios", "tests"):
+        for item in engine.data[group]:
+            check("期待判定 / " + item["key"], lambda t=item: engine.evaluate(engine.input_from(t))["decision"] == t["expected"])
+            check("記録の再検証 / " + item["key"], lambda t=item: engine.verify(engine.packet(engine.input_from(t)))["ok"])
+    for key in ("missing", "unsupported"):
+        def complete_test(k: str = key) -> bool:
+            before = engine.packet(engine.input_from(engine.scenario(k)))
+            unchanged = canonical(before)
+            after = engine.packet(engine.complete(k, before))
+            return (before["payload"]["verification"]["decision"] == "HOLD" and after["payload"]["verification"]["decision"] == "PASS"
+                    and canonical(before) == unchanged and engine.verify(after)["ok"]
+                    and after["payload"]["evaluation_input"]["resolution_log"][-1]["prior_packet_id"] == before["packet_id"])
+        check("補完・前件保持 / " + key, complete_test)
+    mutations = {
+        "従業員数のboolを拒否": {"applicant.employees": True},
+        "負の従業員数を拒否": {"applicant.employees": -1},
+        "文字列の従業員数を拒否": {"applicant.employees": "8"},
+        "文字列の真偽値を拒否": {"applicant.tax_arrears": "false"},
+        "存在しない日付を拒否": {"as_of": "2026-02-30"},
+        "基準日nullを拒否": {"as_of": None},
+        "資料ID重複を拒否": {"source_ids": ["SRC-01", "SRC-01"]},
+        "資料重複を拒否": {"sources": [engine.base()["sources"][0]] * 2},
+        "空の主張集合を拒否": {"candidate.claims": {}},
+        "金額のboolを拒否": {"candidate.claims.max_yen.value": True},
+        "補助率のboolを拒否": {"candidate.claims.rate.value": True},
+        "不正な主張日付を拒否": {"candidate.claims.deadline.value": "2026-13-01"},
+        "曖昧なハッシュ文字列を拒否": {"candidate.claims.max_yen.source_hash": "bad"},
+        "必須条件IDの重複を拒否": {"candidate.claims.conditions.value": ["tax", "tax"]},
+        "未定義の主張を拒否": {"candidate.claims": {**engine.base()["candidate"]["claims"], "unknown": {"value": True}}},
+        "安全整数域外を拒否": {"applicant.employees": MAX_SAFE_INTEGER + 1},
+        "受理域外の小数精度を拒否": {"candidate.claims.rate.value": 0.123},
+    }
+    for name, changes in mutations.items():
+        check(name, lambda c=changes: invalid_input(c))
+    for name, text in (("JSONキーの重複を拒否", '{"a":1,"a":2}'), ("NaNを拒否", '{"x":NaN}'),
+                       ("Infinityを拒否", '{"x":Infinity}'), ("壊れたJSONを拒否", '{"x":'),
+                       ("不正Unicodeを拒否", '{"x":"\\ud800"}')):
+        check(name, lambda t=text: invalid_json(t))
+    packet_mutations = {
+        "判定改変＋ハッシュ再計算を検出": {"payload.verification.decision": "REJECT"},
+        "許可操作だけの改変を検出": {"payload.verification.permitted_action": "external_send"},
+        "要求IDの差替えを検出": {"payload.requirements.id": "OTHER"},
+        "要求版の差替えを検出": {"payload.requirements.version": "2.0"},
+        "要求本文の差替えを検出": {"payload.requirements.specification.permitted_use": "automatic_award"},
+        "ケースIDの不一致を検出": {"payload.case_id": "OTHER"},
+        "未確認事項の改変を検出": {"payload.unresolved": [{"requirement": "R01", "status": "HOLD", "reason": "変更"}]},
+        "保証範囲の水増しを検出": {"payload.scope.real_world_validation": True},
+        "対象外注記の削除を検出": {"payload.nonclaims": []},
+        "時刻認証の虚偽表示を検出": {"payload.time_attestation": "certified"},
+        "時刻の不正形式を検出": {"payload.local_execution_time": "2026-02-30T00:00:00.000Z"},
+        "未知スキーマを拒否": {"payload.schema": "unknown"},
+        "署名付きとの虚偽表示を検出": {"integrity.issuer_signature": "not-a-signature"},
+        "ハッシュ方式の差替えを検出": {"integrity.algorithm": "MD5"},
+        "正規化方式の差替えを検出": {"integrity.canonicalization": "OTHER"},
+    }
+    for name, changes in packet_mutations.items():
+        check(name, lambda c=changes: blocked_packet(c))
+    check("本文の変更をハッシュで検出", lambda: blocked_packet({"payload.evaluation_input.candidate.text": "変更された文"}, False))
+    check("自由文と構造化主張の不一致をR08で拒否", lambda: engine.evaluate(apply_changes(engine.base(), {"candidate.text": "独自に追記された無検証の文"}))["decision"] == "REJECT")
+    check("全参照の欠落ではPASSにしない", lambda: engine.evaluate(apply_changes(engine.base(), {"source_ids": []}))["decision"] == "HOLD")
+    check("REJECTはHOLDより優先", lambda: engine.evaluate(apply_changes(engine.base(), {"applicant.employees": None, "workflow.external_send": True}))["decision"] == "REJECT")
+    check("外部通信を許可する申告を拒否", lambda: engine.evaluate(apply_changes(engine.base(), {"data_policy.network": "enabled"}))["decision"] == "REJECT")
+
+    def changed_source() -> bool:
+        x = engine.base()
+        x["sources"][0]["facts"]["max_yen"] = 600000
+        x["sources"][0]["text"] = x["sources"][0]["text"].replace("上限30万円", "上限60万円")
+        x["candidate"]["claims"]["max_yen"]["value"] = 600000
+        for cl in x["candidate"]["claims"].values():
+            if cl["source_id"] == "SRC-01":
+                cl["source_hash"] = digest(x["sources"][0])
+        x["candidate"]["text"] = build_text(x["candidate"]["claims"])
+        r = engine.evaluate(x)
+        return r["decision"] == "REJECT" and r["checks"][-1]["status"] == "REJECT"
+    check("資料と参照ハッシュの同時変更も固定資料照合で拒否", changed_source)
+
+    def changed_reference() -> bool:
+        data = copy.deepcopy(engine.data)
+        data["requirements"]["criteria"] = []
+        try:
+            Engine(data)
+        except InputError:
+            return True
+        return False
+    check("固定参照仕様の差替えを起動時に拒否", changed_reference)
+    fake_expectation = copy.deepcopy(engine.scenario("normal"))
+    fake_expectation["expected"] = "REJECT"
+    check("期待ラベルを判定入力に使わない", lambda: engine.evaluate(engine.input_from(fake_expectation))["decision"] == "PASS")
+    check("JSONの整数1と小数1.0をHTMLと同様に照合", lambda: canonical(1.0) == canonical(1))
+    check("JSONの真偽値と数値を区別", lambda: not same(True, 1))
+    check("Unicodeキー順序はUTF-16順", lambda: canonical({"\ue000": 1, "😀": 2}).index("😀") < canonical({"\ue000": 1, "😀": 2}).index("\ue000"))
+    return rows
+
+
+def create_output(root: Path, kind: str) -> Path:
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+    path = root / f"{kind}-{stamp}Z-{uuid.uuid4().hex[:6]}"
+    path.mkdir(parents=True, exist_ok=False)
+    return path
+
+
+def save_record(engine: Engine, folder: Path, x: dict[str, Any], group: str, key: str,
+                label: str, expected: str, prior_id: str | None = None) -> dict[str, Any]:
+    packet = engine.packet(x)
+    replay = engine.verify(packet)
+    decision = packet["payload"]["verification"]["decision"]
+    packet_name = "packets/" + packet["packet_id"] + ".json"
+    path = folder / packet_name
+    if path.exists():
+        require(same(read_json(path), packet), "短縮パケットIDが衝突したため保存を停止しました。")
+    else:
+        write_json(path, packet)
+    # 実際にディスクから読み直す。計算時のオブジェクトの自己比較だけにしない。
+    saved_check = engine.verify(read_json(path))
+    draft_name = None
+    if decision == "PASS" and replay["ok"] and saved_check["ok"]:
+        draft_name = "drafts/" + packet["packet_id"] + ".txt"
+        (folder / draft_name).write_text("【架空データ／職員確認用の回答案】\n受給・採択の決定や、住民への自動送信には使用しません。\n\n" + x["candidate"]["text"] + "\n", encoding="utf-8")
+    return {"group": group, "key": key, "label": label, "case_id": x["id"], "expected": expected,
+            "actual": decision, "matched": decision == expected, "packet_id": packet["packet_id"],
+            "packet_file": packet_name, "draft_file": draft_name, "prior_packet_id": prior_id,
+            "reverification": saved_check, "checks": packet["payload"]["verification"]["checks"],
+            "claim_evidence": packet["payload"]["verification"]["claim_evidence"],
+            "unresolved": packet["payload"]["unresolved"], "_packet": packet}
+
+
+def report_html(summary: dict[str, Any], records: list[dict[str, Any]], tests: list[dict[str, Any]]) -> str:
+    esc = lambda v: html.escape(str(v), quote=True)
+
+    def badge(status: str) -> str:
+        return f'<span class="badge {esc(status.lower())}">{esc(status)}</span>'
+
+    def row(record: dict[str, Any], detailed: bool = False) -> str:
+        issues = record["unresolved"]
+        explanation = "指定8条件を通過。職員が確認する回答案として扱えます。" if not issues else " / ".join(c["requirement"] + "：" + c["reason"] for c in issues)
+        links = f'<a href="{esc(record["packet_file"])}">責任情報パケット JSON</a>'
+        if record["draft_file"]:
+            links += f' · <a href="{esc(record["draft_file"])}">職員確認用の回答案</a>'
+        else:
+            links += ' · <span class="muted">採用用ファイルは出力しません</span>'
+        details = ""
+        if detailed:
+            checks = "".join(f'<tr><td>{esc(c["id"])}</td><td>{esc(c["name"])}</td><td>{badge(c["status"])}</td><td>{esc(c["detail"])}</td></tr>' for c in record["checks"])
+            claims = "".join(f'<tr><td>{esc(c["label"])}</td><td>{esc(c["source_id"] or "未登録")} / {esc(c["section"] or "未登録")}</td><td>{badge(c["status"])}</td><td>{esc(c["detail"])}</td></tr>' for c in record["claim_evidence"])
+            details = f'<details><summary>8条件と7主張の確認内容を見る</summary><div class="scroll"><table>{checks}</table><h4>主張と根拠の対応</h4><table>{claims}</table></div></details>'
+        return f'<article class="case"><div class="case-title"><div><small>{esc(record["case_id"])}</small><h3>{esc(record["label"])}</h3></div>{badge(record["actual"])}</div><p>{esc(explanation)}</p><div class="links">{links}</div>{details}</article>'
+
+    main = "".join(row(r, True) for r in records if r["group"] == "scenario")
+    complete = "".join(row(r, True) + f'<p class="history">補完前のHOLD記録：<a href="packets/{esc(r["prior_packet_id"])}.json">{esc(r["prior_packet_id"])}</a> → 上記の新しい記録。前件は上書きしていません。</p>' for r in records if r["group"] == "completion")
+    reference_rows = "".join(f'<tr><td>{esc(r["case_id"])}</td><td>{esc(r["label"])}</td><td>{badge(r["expected"])}</td><td>{badge(r["actual"])}</td><td>{"一致" if r["matched"] else "不一致"}</td><td><a href="{esc(r["packet_file"])}">JSON</a></td></tr>' for r in records if r["group"] == "reference_test")
+    test_rows = "".join(f'<tr><td>{esc(t["name"])}</td><td>{"OK" if t["passed"] else "失敗"}</td><td>{esc(t["detail"])}</td></tr>' for t in tests)
+    references = summary["reference_tests"]
+    replay = summary["reverification"]
+    status = "実行・照合が完了しました" if summary["ok"] else "不一致またはテスト失敗があります"
+    return '''<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<title>第1弾PoC｜Python実行結果</title><style>
+*{box-sizing:border-box}body{margin:0;background:#f3f6f7;color:#153442;font:14px/1.85 -apple-system,BlinkMacSystemFont,"Yu Gothic UI",Meiryo,sans-serif}main{max-width:1120px;margin:auto;padding:36px 28px 65px}header{background:#102d3b;color:white;padding:18px 28px}.head{max-width:1064px;margin:auto;display:flex;justify-content:space-between;gap:16px;font-size:12px}h1{font-size:32px;line-height:1.5;margin:8px 0 12px}h2{font-size:22px;margin:32px 0 12px}h3{font-size:17px;margin:0}h4{margin:18px 0 8px}p{margin:9px 0}.kicker{font-size:11px;letter-spacing:.14em;color:#087c70;font-weight:750}.intro{max-width:800px;color:#536d78}.notice{border-left:3px solid #087c70;background:#e8f4ef;padding:13px 17px;margin:20px 0}.metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}.metric,.case{background:white;border:1px solid #dbe5e9;border-radius:12px;padding:18px 20px}.metric b{display:block;font-size:29px;line-height:1.6}.metric span,.muted{color:#637b87;font-size:12px}.case{margin:12px 0}.case-title{display:flex;justify-content:space-between;align-items:center;gap:16px}small{color:#708793;font-family:monospace}.case p{font-size:12px}.badge{display:inline-block;border-radius:6px;padding:3px 9px;font:700 11px/1.7 monospace;white-space:nowrap}.pass{background:#e6f4ed;color:#086d5d}.hold{background:#fff3d9;color:#8e5b06}.reject{background:#fbe9e9;color:#a82f38}.links{font-size:12px;margin:11px 0}a{color:#087467;text-underline-offset:3px}.flow{display:flex;justify-content:space-between;gap:20px;margin:23px 0;padding:14px 0;border-top:1px solid #d6e2e7;border-bottom:1px solid #d6e2e7;font-weight:700}.flow small{display:block;font-family:inherit}details{margin-top:12px;border-top:1px solid #e4ebee;padding-top:10px}summary{cursor:pointer;font-size:12px;font-weight:700}.scroll{overflow:auto}table{border-collapse:collapse;width:100%;font-size:11px;margin-top:12px}td,th{text-align:left;vertical-align:top;padding:10px;border-bottom:1px solid #e0e8eb}th{background:#eaf0f3}code{font:12px/1.8 Consolas,monospace;overflow-wrap:anywhere}pre{white-space:pre-wrap;background:#102d3b;color:#dcebe9;padding:16px 20px;border-radius:9px}.history{font-size:11px;color:#5c7682;padding:0 8px 10px;overflow-wrap:anywhere}.fine{font-size:11px;color:#617884;overflow-wrap:anywhere}footer{margin-top:28px;padding-top:15px;border-top:1px solid #dbe5e9}.steps{display:grid;grid-template-columns:1fr 1fr;gap:20px}.steps>div{background:#fff;border:1px solid #dbe5e9;padding:18px 20px;border-radius:12px}
+@media(max-width:720px){main{padding:24px 16px}h1{font-size:25px}.metrics{grid-template-columns:1fr}.metric b{font-size:25px}.flow{font-size:11px;gap:8px}.flow small{font-size:10px}.steps{grid-template-columns:1fr}.head{font-size:10px}.case-title{align-items:start}.case{padding:15px}h3{font-size:15px}td{min-width:60px}table{min-width:620px}}
+</style></head><body><header><div class="head"><b>自治体AI 回答採用アシュアランス</b><span>Python PoC 1.0 · 合成データのみ</span></div></header><main>''' + f'''
+<div class="kicker">PHASE 01 / EXECUTION REPORT</div><h1>何が進み、何が止まったか。</h1>
+<p class="intro">{esc(status)}。このページはPythonが実際に生成した結果です。元の操作デモHTMLは変更していません。まず代表6ケースの判定と理由を確認してください。</p>
+<div class="notice"><strong>PASS＝職員が確認する回答案として採用可。</strong> 補助金の受給・採択決定ではありません。制度・自治体・資料・相談者はすべて架空です。</div>
+<div class="flow"><div>① 業務要求パケット<small>採用対象の8条件・版を固定</small></div><div>→</div><div>② 回答案の採用判定<small>PASS / HOLD / REJECT</small></div><div>→</div><div>③ 責任情報パケット<small>根拠・未確認事項・再検証</small></div></div>
+<div class="metrics"><div class="metric"><span>参考ケースの期待判定との一致</span><b>{references['matched']} / {references['total']}</b><span>ルール試験。実AIの正答率ではありません。</span></div><div class="metric"><span>保存パケットの再検証成立</span><b>{replay['passed']} / {replay['total']}</b><span>HOLD・REJECTの記録も含みます。</span></div><div class="metric"><span>異常入力を含む自己テスト</span><b>{summary['self_tests']['passed']} / {summary['self_tests']['total']}</b><span>既知のケースに対する実装確認です。</span></div></div>
+<h2>01　まず代表ケースを見る</h2><p class="muted">上限額が合っていても、根拠への対応がなければHOLD。不整合があればREJECTです。</p>{main or '<p>この実行では代表ケースを選択していません。</p>'}
+<h2>02　不足を補い、もう一度判定する</h2><p class="muted">合成の属性値や根拠参照を補完した例です。実住民への確認ではありません。ログは前件IDを記録しますが、確認者の認証や履歴の完全性を保証しません。</p>{complete or '<p>この実行には補完ケースを含めていません。</p>'}
+<h2>03　参考テストの内訳</h2><p>PASS {references['counts']['PASS']}件 / HOLD {references['counts']['HOLD']}件 / REJECT {references['counts']['REJECT']}件。</p>
+<details><summary>全{references['total']}件の期待値・実際の判定を見る</summary><div class="scroll"><table><thead><tr><th>ID</th><th>ケース</th><th>期待</th><th>実際</th><th>照合</th><th>記録</th></tr></thead><tbody>{reference_rows}</tbody></table></div></details>
+<details><summary>自己テスト{summary['self_tests']['total']}件の結果を見る</summary><div class="scroll"><table>{test_rows}</table></div></details>
+<h2>04　保存した結果を再検証する</h2><div class="steps"><div><h3>Pythonで再検証</h3><p>プロジェクトのフォルダで、次を実行します。</p><pre><code>python poc.py verify output</code></pre><p class="fine">このコマンドは全実行フォルダ内の責任情報パケットを再検証します。再検証成立と採用可は別です。</p></div><div><h3>元HTMLで再検証</h3><p>元HTMLの「要求と証拠」→「JSONを読み込む」で、各ケースのJSONを選択します。</p><p class="fine">元HTMLは読み込んだ記録の検証結果を表示します。上部の選択ケースやデモ画面自体をPythonの結果に切り替える機能ではありません。</p></div></div>
+<h2>検証範囲と公表時の注意</h2><p>実装したのは、構造化された要求・主張・根拠参照の照合、理由付き判定、保存記録の再計算です。<strong>生成AIの呼出し、自由文の完全な意味検証、形式証明、実住民の属性確認、資料発行者の認証、法令への包括適合、実運用のプライバシー保証は実装していません。</strong></p>
+<p>ハッシュは内容の照合用で、電子署名や時刻認証ではありません。元HTML・本Python・参照データの正当な版を信頼して使う必要があります。期待判定との一致をAI精度・事故防止率として公表しないでください。社名・公表文・実装コードの開示範囲は両社で別途確認してください。</p>
+<footer class="fine">実行時刻（ローカルPC時計のUTC表記・時刻認証なし）：{esc(summary['executed_at_utc'])}<br>固定基準日：2026-10-01（境界値テストを除く） / Python {esc(summary['python_version'])}<br>poc.py SHA-256：{esc(summary['python_sha256'])}<br>cases.json SHA-256：{esc(summary['data_sha256'])}<br>元HTML：{esc(summary['original_html_status'])}<br><a href="summary.json">機械可読の結果サマリー</a> · <a href="self_test_report.json">自己テスト記録</a></footer>
+</main></body></html>'''
+
+
+def run(engine: Engine, data_path: Path, out_root: Path, selected: str | None = None,
+        completion_only: str | None = None) -> tuple[Path, bool]:
+    # ケースの解決に失敗しただけで、空の実行フォルダを残さない。
+    selected_items = [engine.scenario(completion_only or selected)] if (completion_only or selected) else engine.data["scenarios"]
+    folder = create_output(out_root, "run")
+    (folder / "packets").mkdir()
+    (folder / "drafts").mkdir()
+    records: list[dict[str, Any]] = []
+    prior_packets = {}
+    for item in selected_items:
+        r = save_record(engine, folder, engine.input_from(item), "scenario", item["key"], item["label"], item["expected"])
+        records.append(r)
+        prior_packets[item["key"]] = r["_packet"]
+    if not selected and not completion_only:
+        for item in engine.data["tests"]:
+            records.append(save_record(engine, folder, engine.input_from(item), "reference_test", item["key"], item["label"], item["expected"]))
+    completion_keys = [completion_only] if completion_only else ["missing", "unsupported"] if not selected else []
+    for key in completion_keys:
+        require(key is not None and key in prior_packets, "補完元のパケットがありません。")
+        prior = prior_packets[key]
+        x = engine.complete(key, prior)
+        records.append(save_record(engine, folder, x, "completion", key + "_completed", engine.scenario(key)["label"] + " → 補完後", "PASS", prior["packet_id"]))
+    tests = self_tests(engine)
+    successful_tests = sum(t["passed"] for t in tests)
+    reference = [r for r in records if r["group"] == "reference_test"]
+    counts = Counter(r["actual"] for r in reference)
+    py_path = Path(__file__).resolve()
+    original_html = ROOT / "civic_ai_poc_demo.html"
+    original_status = "未同梱（Python実行には不要）"
+    if original_html.is_file():
+        actual = hashlib.sha256(original_html.read_bytes()).hexdigest()
+        original_status = "元ファイルとSHA-256一致・未変更" if actual == ORIGINAL_HTML_SHA256 else "元ファイルと不一致。HTML互換性の前提を再確認してください。"
+    ok = all(r["matched"] and r["reverification"]["ok"] for r in records) and successful_tests == len(tests)
+    summary = {
+        "schema": "civic-poc-run-report/1.0", "demo_only": True, "ok": ok,
+        "executed_at_utc": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+        "python_version": sys.version.split()[0], "engine_version": VERSION,
+        "python_sha256": hashlib.sha256(py_path.read_bytes()).hexdigest(), "data_sha256": hashlib.sha256(data_path.read_bytes()).hexdigest(),
+        "reference_sha256": REFERENCE_SHA256, "original_html_status": original_status,
+        "reference_tests": {"total": len(reference), "matched": sum(r["matched"] for r in reference), "counts": {s: counts[s] for s in STATUSES}},
+        "reverification": {"total": len(records), "passed": sum(r["reverification"]["ok"] for r in records)},
+        "self_tests": {"total": len(tests), "passed": successful_tests},
+        "records": [{k: v for k, v in r.items() if k != "_packet"} for r in records],
+        "limitations": ["Synthetic rule tests, not AI accuracy", "No live AI or real municipality integration", "No legal/privacy certification", "No issuer authentication or trusted timestamp", "History references are recorded, not authenticated"],
+    }
+    write_json(folder / "summary.json", summary)
+    write_json(folder / "self_test_report.json", {"schema": "civic-poc-self-tests/1.0", "total": len(tests), "passed": successful_tests, "results": tests})
+    (folder / "report.html").write_text(report_html(summary, records, tests), encoding="utf-8")
+    print("\n自治体AI・回答採用アシュアランス / 第1弾PoC\n")
+    for r in records:
+        if r["group"] != "reference_test":
+            print(f"  {r['actual']:6}  {r['label']}")
+    if reference:
+        print(f"\n参考テスト：{sum(r['matched'] for r in reference)}/{len(reference)}件一致（PASS {counts['PASS']} / HOLD {counts['HOLD']} / REJECT {counts['REJECT']}）")
+    print(f"保存記録の再検証：{sum(r['reverification']['ok'] for r in records)}/{len(records)}件成立")
+    print(f"自己テスト：{successful_tests}/{len(tests)}件成功")
+    print(f"\n結果を見る：{folder / 'report.html'}")
+    print("元HTMLは変更していません。実AI・実住民情報・実行政システムへの接続はありません。")
+    print("PASSは職員確認用の回答案のみ。再検証成立は受給資格や発行者の認証ではありません。")
+    if not ok:
+        print("\n注意：不一致があります。summary.json / self_test_report.json を確認してください。", file=sys.stderr)
+    return folder, ok
+
+
+def verify_path(engine: Engine, target: Path) -> bool:
+    if target.is_dir():
+        paths = sorted(p for p in target.rglob("RIP-DEMO-*.json") if p.is_file())
+    else:
+        paths = [target]
+    require(0 < len(paths) <= 2000, "対象は1～2000件の責任情報パケットにしてください。フォルダ指定ではRIP-DEMO-*.jsonを探します。")
+    good = 0
+    for path in paths:
+        try:
+            value = engine.verify(read_json(path))
+            good += int(value["ok"])
+            print(f"{'成立' if value['ok'] else '不成立'} / 再計算={value['recomputed_decision']} / {path.name}")
+            if not value["ok"]:
+                print(json.dumps(value, ensure_ascii=False))
+        except (InputError, OSError, UnicodeError, KeyError, TypeError, RecursionError) as exc:
+            print(f"不成立 / {path.name} / {exc}", file=sys.stderr)
+    print(f"\n再検証：{good}/{len(paths)}件成立。HOLD・REJECTをPASSに変更する処理ではありません。")
+    print("履歴中の前件IDは記録内容として照合しますが、確認者の認証や履歴全体の完全性は検証しません。")
+    return good == len(paths)
 
 
 def cli() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    sub = parser.add_subparsers(dest='command')
-    run = sub.add_parser('run', help='Run all fixed synthetic scenarios')
-    run.add_argument('--case', choices=[s['key'] for s in config()['scenarios']])
-    run.add_argument('--out', type=Path, default=ROOT / 'output')
-    for command in ('prepare', 'test', 'http-test', 'node-test', 'lean-test', 'publish'):
-        sub.add_parser(command)
-    verify = sub.add_parser('verify'); verify.add_argument('path', type=Path)
-    browser = sub.add_parser('browser-test'); browser.add_argument('--screenshots', type=Path)
-    browser.add_argument('--snapshot-only', action='store_true', help='Render saved records without browser network access; explicitly excludes live UI integration')
-    ci = sub.add_parser('ci'); ci.add_argument('--snapshot-only', action='store_true', help='Only allowed with --runtime-only')
-    ci.add_argument('--runtime-only', action='store_true', help='Explicitly exclude Lean; never marks formal checks as successful')
-    serve = sub.add_parser('serve'); serve.add_argument('--port', type=int, default=8765)
+    parser.add_argument("--version", action="version", version=VERSION)
+    parser.add_argument("--data", type=Path, default=ROOT / "cases.json", help="ダミーデータJSON（既定は本Pythonと同じフォルダ）")
+    parser.add_argument("--out", type=Path, default=ROOT / "output", help="出力先。実行ごとに別フォルダを作成")
+    commands = parser.add_subparsers(dest="command")
+    run_parser = commands.add_parser("run", help="代表6件・参考30件・補完2件を実行")
+    run_parser.add_argument("--case", help="代表ケースのキーまたはCASE-01等を1件指定")
+    complete_parser = commands.add_parser("complete", help="補完前と補完後を別記録として実行")
+    complete_parser.add_argument("case", choices=["missing", "unsupported"])
+    verify_parser = commands.add_parser("verify", help="保存済みパケットまたはフォルダを再検証")
+    verify_parser.add_argument("path", type=Path)
+    commands.add_parser("test", help="回帰・異常入力・変更検出の自己テスト")
+    # --data/--outはサブコマンドの前後どちらでも使える。
+    for sub in (run_parser, complete_parser, verify_parser, commands.choices["test"]):
+        sub.add_argument("--data", type=Path, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+        sub.add_argument("--out", type=Path, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     args = parser.parse_args()
-    command = args.command or 'run'
-    bridge = Bridge()
-    if command == 'prepare':
-        print('Locked original sources are ready. No existing repository or experiment record was changed.')
-        return 0
-    if command == 'test':
-        report = run_tests(bridge); print(json.dumps(report, ensure_ascii=False, indent=2)); assert_success(report, 'Python tests'); return 0
-    if command == 'http-test':
-        report = http_tests(bridge); print(json.dumps(report, ensure_ascii=False, indent=2)); assert_success(report, 'HTTP tests'); return 0
-    if command == 'node-test':
-        print(json.dumps(node_tests(bridge), ensure_ascii=False, indent=2)); return 0
-    if command == 'browser-test':
-        print(json.dumps(browser_tests(bridge, args.screenshots, args.snapshot_only), ensure_ascii=False, indent=2)); return 0
-    if command == 'lean-test':
-        print(json.dumps(lean_checks(bridge), ensure_ascii=False, indent=2)); return 0
-    if command == 'verify':
-        count = bridge.verify_document(read_json(args.path)); print(f'Replayed {count} record(s). HOLD/REJECT remain HOLD/REJECT; not issuer authentication.'); return 0
-    if command == 'publish':
-        tests = run_tests(bridge); assert_success(tests, 'Python tests')
-        http = http_tests(bridge); assert_success(http, 'HTTP tests')
-        evidence = bridge.all_records(); require(bridge.verify_document(evidence) == len(bridge.scenarios), 'Replay failed')
-        write_json(ROOT / 'evidence.json', evidence)
-        update_snapshot(bridge, evidence, ROOT / 'demo.html')
-        require(verify_snapshot(bridge, evidence), 'Snapshot mismatch')
-        print(json.dumps({'published_locally': True, 'records': len(bridge.scenarios),
-                          'python': tests, 'http': http, 'lean_checked_by_this_command': False,
-                          'external_uploads': 0}, ensure_ascii=False, indent=2))
-        return 0
-    if command == 'ci':
-        tests = run_tests(bridge); assert_success(tests, 'Python tests')
-        http = http_tests(bridge); assert_success(http, 'HTTP tests')
-        node = node_tests(bridge)
-        evidence = read_json(ROOT / 'evidence.json')
-        count = bridge.verify_document(evidence)
-        require(verify_snapshot(bridge, evidence), 'Published snapshot differs from replayed evidence')
-        require(not args.snapshot_only or args.runtime_only, '--snapshot-only is only valid with --runtime-only; full CI cannot skip the live UI test')
-        browser = browser_tests(bridge, snapshot_only=args.snapshot_only)
-        result = {'python': tests, 'http': http, 'javascript': node, 'browser': browser, 'replayed_records': count,
-                  'gennai_oss_environment_tested': False, 'external_ai_calls': 0}
-        if args.runtime_only:
-            result.update(runtime_ok=True, lean_checked=False, validation_scope='runtime-only; formal checks not executed')
-        else:
-            result['formal'] = lean_checks(bridge)
-            result.update(runtime_ok=True, lean_checked=True, validation_scope='synthetic-reference-model-and-runtime')
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-        return 0
-    if command == 'serve':
-        require(1 <= args.port <= 65535, 'Invalid port')
-        capture = ROOT / 'output' / ('http-' + uuid.uuid4().hex[:12])
-        server = make_server(bridge, args.port, os.environ.get('CIVIC_BRIDGE_API_KEY'), capture)
-        print(f'Open http://127.0.0.1:{server.server_port}/  (Ctrl+C to stop)', flush=True)
-        print('Synthetic reference only. Bound to localhost; no external AI calls.', flush=True)
-        if not os.environ.get('CIVIC_BRIDGE_API_KEY'):
-            print('A temporary local demo key was generated. For API clients, set CIVIC_BRIDGE_API_KEY before starting.', flush=True)
-        try:
-            server.serve_forever()
-        except KeyboardInterrupt:
-            pass
-        finally:
-            server.server_close()
-        return 0
-    out_root = getattr(args, 'out', ROOT / 'output')
-    folder = out_root / ('run-' + uuid.uuid4().hex[:12])
-    key = getattr(args, 'case', None)
-    evidence = bridge.run_case(key) if key else bridge.all_records()
-    count = bridge.verify_document(evidence)
-    write_json(folder / 'evidence.json', evidence)
-    write_json(folder / 'registration.json', bridge.registration())
-    view = evidence if 'records' in evidence else {'records': [evidence]}
-    update_snapshot(bridge, view, folder / 'report.html')
-    for record in view['records']:
-        print(f"{record['payload']['summary']['decision']:6} {record['payload']['label']}")
-    print(f'\nReplayed {count} record(s). Open: {folder / "report.html"}')
-    print('No external AI / no deployed Gennai OSS test / no government certification.')
-    return 0
-
-
-if __name__ == '__main__':
-    for stream in (sys.stdout, sys.stderr):
-        if hasattr(stream, 'reconfigure'):
-            stream.reconfigure(encoding='utf-8', errors='replace')
     try:
-        raise SystemExit(cli())
-    except Exception as exc:
-        print('検査・実行は完了していません。成功として扱わないでください。\n' + str(exc), file=sys.stderr)
-        raise SystemExit(2)
+        engine = Engine(read_json(args.data))
+        command = args.command or "run"
+        if command == "verify":
+            return 0 if verify_path(engine, args.path) else 1
+        if command == "test":
+            tests = self_tests(engine)
+            passed = sum(t["passed"] for t in tests)
+            folder = create_output(args.out, "test")
+            write_json(folder / "self_test_report.json", {"schema": "civic-poc-self-tests/1.0", "total": len(tests), "passed": passed, "results": tests})
+            for item in tests:
+                if not item["passed"]:
+                    print("失敗：" + item["name"] + " / " + item["detail"], file=sys.stderr)
+            print(f"自己テスト：{passed}/{len(tests)}件成功\n結果：{folder / 'self_test_report.json'}")
+            return 0 if passed == len(tests) else 1
+        _, ok = run(engine, args.data, args.out, selected=getattr(args, "case", None) if command == "run" else None,
+                    completion_only=args.case if command == "complete" else None)
+        return 0 if ok else 1
+    except (InputError, OSError, UnicodeError, KeyError, TypeError, RecursionError) as exc:
+        print(f"入力・実行エラー：{exc}\nこの入力を採用可として扱わないでください。", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+    raise SystemExit(cli())
