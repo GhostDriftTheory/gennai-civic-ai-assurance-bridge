@@ -1,0 +1,767 @@
+{
+  "schema": "civic-privacy-cases/1.0",
+  "metadata": {
+    "title": "自治体AI・プライバシーアシュアランス PoC第2弾",
+    "note": "すべて架空。実住民情報・外部AI・実ネットワーク送信を使用しない。"
+  },
+  "policy": {
+    "id": "CIVIC-PRIVACY-DEMO-02",
+    "version": "1.0",
+    "as_of": "2026-10-01",
+    "purpose": "childcare_guidance",
+    "use": "staff_draft",
+    "role": "consultation_staff",
+    "recipient": "MOCK-AI-JP",
+    "terms_version": "DEMO-TERMS-1",
+    "region": "DEMO-JP",
+    "basis_id": "BASIS-DEMO-01",
+    "transform": "minimise-v1",
+    "budget_limit": 3,
+    "fields": {
+      "topic": {
+        "label": "相談分野",
+        "units": 0
+      },
+      "age_band": {
+        "label": "年代",
+        "units": 1
+      },
+      "household_band": {
+        "label": "世帯人数の区分",
+        "units": 1
+      },
+      "area": {
+        "label": "広域の地域区分",
+        "units": 2
+      },
+      "income_band": {
+        "label": "所得区分（架空）",
+        "units": 2
+      }
+    },
+    "gate_names": [
+      "対象データと共有範囲",
+      "利用目的・用途・人間の確認",
+      "利用根拠・操作権限",
+      "送信先・取扱条件",
+      "送信項目の限定",
+      "元データ・変換・送信内容の対応",
+      "累積開示の上限",
+      "状態確認・重複実行の防止"
+    ],
+    "output_gate_names": [
+      "応答と要求の対応",
+      "出力項目の範囲",
+      "定型文と内容の一致",
+      "職員確認用への用途限定"
+    ],
+    "disclosure_note": "点数は固定項目の集合に対するデモ上の制約。差分プライバシーのε、再識別確率、法的な安全基準ではない。"
+  },
+  "sources": {
+    "SYN-A": {
+      "synthetic": true,
+      "resident_name": "架空住民A",
+      "resident_id": "SYN-0001",
+      "street_address": "架空市・詳細住所A",
+      "age": 37,
+      "household_size": 3,
+      "area": "地域A",
+      "income_band": "区分B",
+      "topic": "子育て相談",
+      "health_note": "架空の健康相談メモA（入力対象外）"
+    },
+    "SYN-B": {
+      "synthetic": true,
+      "resident_name": "架空住民B",
+      "resident_id": "SYN-0002",
+      "street_address": "架空市・詳細住所B",
+      "age": 62,
+      "household_size": 1,
+      "area": "地域B",
+      "income_band": "区分A",
+      "topic": "子育て相談",
+      "health_note": "架空の健康相談メモB（入力対象外）"
+    },
+    "SYN-C": {
+      "synthetic": true,
+      "resident_name": "架空住民C",
+      "resident_id": "SYN-0003",
+      "street_address": "架空市・詳細住所C",
+      "age": 29,
+      "household_size": 4,
+      "area": "地域C",
+      "income_band": "区分C",
+      "topic": "子育て相談",
+      "health_note": "架空の健康相談メモC（入力対象外）"
+    }
+  },
+  "base_request": {
+    "request_id": "REQ-BASE",
+    "source_id": "SYN-A",
+    "purpose": "childcare_guidance",
+    "use": "staff_draft",
+    "human_confirmation": true,
+    "role": "consultation_staff",
+    "basis": "confirmed",
+    "basis_id": "BASIS-DEMO-01",
+    "recipient": "MOCK-AI-JP",
+    "terms": "confirmed",
+    "terms_version": "DEMO-TERMS-1",
+    "region": "DEMO-JP",
+    "training": false,
+    "retention_days": 0,
+    "fields": [
+      "topic",
+      "age_band",
+      "household_band"
+    ],
+    "transform": "minimise-v1",
+    "evidence": true,
+    "payload_patch": {},
+    "response": "safe",
+    "outcome": "ack"
+  },
+  "tests": [
+    {
+      "key": "normal",
+      "label": "必要項目だけで案内の下書き",
+      "changes": {},
+      "seed": {},
+      "expected_send": "PASS",
+      "expected_adopt": "PASS"
+    },
+    {
+      "key": "basis_missing",
+      "label": "利用根拠の記録が未確認",
+      "changes": {
+        "basis": "missing",
+        "basis_id": null
+      },
+      "seed": {},
+      "expected_send": "HOLD",
+      "expected_adopt": "HOLD"
+    },
+    {
+      "key": "basis_denied",
+      "label": "利用根拠が否認されている",
+      "changes": {
+        "basis": "denied"
+      },
+      "seed": {},
+      "expected_send": "REJECT",
+      "expected_adopt": "HOLD"
+    },
+    {
+      "key": "basis_wrong",
+      "label": "利用根拠の参照先が違う",
+      "changes": {
+        "basis_id": "OTHER"
+      },
+      "seed": {},
+      "expected_send": "REJECT",
+      "expected_adopt": "HOLD"
+    },
+    {
+      "key": "basis_id_missing",
+      "label": "確認済みの申告だけで参照先がない",
+      "changes": {
+        "basis_id": null
+      },
+      "seed": {},
+      "expected_send": "HOLD",
+      "expected_adopt": "HOLD"
+    },
+    {
+      "key": "wrong_role",
+      "label": "権限外の職員区分",
+      "changes": {
+        "role": "unapproved_role"
+      },
+      "seed": {},
+      "expected_send": "REJECT",
+      "expected_adopt": "HOLD"
+    },
+    {
+      "key": "wrong_purpose",
+      "label": "利用目的が違う",
+      "changes": {
+        "purpose": "marketing"
+      },
+      "seed": {},
+      "expected_send": "REJECT",
+      "expected_adopt": "HOLD"
+    },
+    {
+      "key": "wrong_use",
+      "label": "対外送信への用途変更",
+      "changes": {
+        "use": "automatic_send"
+      },
+      "seed": {},
+      "expected_send": "REJECT",
+      "expected_adopt": "HOLD"
+    },
+    {
+      "key": "no_human",
+      "label": "職員確認なし",
+      "changes": {
+        "human_confirmation": false
+      },
+      "seed": {},
+      "expected_send": "REJECT",
+      "expected_adopt": "HOLD"
+    },
+    {
+      "key": "wrong_recipient",
+      "label": "許可していない送信先",
+      "changes": {
+        "recipient": "OTHER-AI"
+      },
+      "seed": {},
+      "expected_send": "REJECT",
+      "expected_adopt": "HOLD"
+    },
+    {
+      "key": "terms_missing",
+      "label": "送信先の取扱条件が未確認",
+      "changes": {
+        "terms": "missing"
+      },
+      "seed": {},
+      "expected_send": "HOLD",
+      "expected_adopt": "HOLD"
+    },
+    {
+      "key": "wrong_terms",
+      "label": "取扱条件の版が違う",
+      "changes": {
+        "terms_version": "OTHER"
+      },
+      "seed": {},
+      "expected_send": "REJECT",
+      "expected_adopt": "HOLD"
+    },
+    {
+      "key": "wrong_region",
+      "label": "許可していない処理地域",
+      "changes": {
+        "region": "OTHER"
+      },
+      "seed": {},
+      "expected_send": "REJECT",
+      "expected_adopt": "HOLD"
+    },
+    {
+      "key": "training",
+      "label": "学習利用が有効",
+      "changes": {
+        "training": true
+      },
+      "seed": {},
+      "expected_send": "REJECT",
+      "expected_adopt": "HOLD"
+    },
+    {
+      "key": "retention",
+      "label": "保持日数が条件外",
+      "changes": {
+        "retention_days": 30
+      },
+      "seed": {},
+      "expected_send": "REJECT",
+      "expected_adopt": "HOLD"
+    },
+    {
+      "key": "empty_fields",
+      "label": "送信項目が空",
+      "changes": {
+        "fields": []
+      },
+      "seed": {},
+      "expected_send": "REJECT",
+      "expected_adopt": "HOLD"
+    },
+    {
+      "key": "name_in_payload",
+      "label": "送信項目に氏名が残る",
+      "changes": {
+        "fields": [
+          "topic",
+          "resident_name"
+        ]
+      },
+      "seed": {},
+      "expected_send": "REJECT",
+      "expected_adopt": "HOLD"
+    },
+    {
+      "key": "address_in_payload",
+      "label": "詳細住所が残る",
+      "changes": {
+        "fields": [
+          "topic",
+          "street_address"
+        ]
+      },
+      "seed": {},
+      "expected_send": "REJECT",
+      "expected_adopt": "HOLD"
+    },
+    {
+      "key": "health_in_payload",
+      "label": "健康メモが残る",
+      "changes": {
+        "fields": [
+          "topic",
+          "health_note"
+        ]
+      },
+      "seed": {},
+      "expected_send": "REJECT",
+      "expected_adopt": "HOLD"
+    },
+    {
+      "key": "free_text",
+      "label": "自由文を最終送信内容に追記",
+      "changes": {
+        "payload_patch": {
+          "free_text": "架空住民Aの相談"
+        }
+      },
+      "seed": {},
+      "expected_send": "REJECT",
+      "expected_adopt": "HOLD"
+    },
+    {
+      "key": "changed_value",
+      "label": "変換後の年代だけを書き換える",
+      "changes": {
+        "payload_patch": {
+          "age_band": "架空住民A"
+        }
+      },
+      "seed": {},
+      "expected_send": "REJECT",
+      "expected_adopt": "HOLD"
+    },
+    {
+      "key": "wrong_transform",
+      "label": "未対応の変換方式",
+      "changes": {
+        "transform": "unreviewed"
+      },
+      "seed": {},
+      "expected_send": "REJECT",
+      "expected_adopt": "HOLD"
+    },
+    {
+      "key": "no_evidence",
+      "label": "変換対応の検査資料がない",
+      "changes": {
+        "evidence": false
+      },
+      "seed": {},
+      "expected_send": "HOLD",
+      "expected_adopt": "HOLD"
+    },
+    {
+      "key": "unknown_source",
+      "label": "未登録の対象データ",
+      "changes": {
+        "source_id": "OTHER"
+      },
+      "seed": {},
+      "expected_send": "REJECT",
+      "expected_adopt": "HOLD"
+    },
+    {
+      "key": "cross_subject",
+      "label": "途中で別の対象へ差し替え",
+      "changes": {
+        "source_id": "SYN-B"
+      },
+      "seed": {},
+      "expected_send": "REJECT",
+      "expected_adopt": "HOLD"
+    },
+    {
+      "key": "history_missing",
+      "label": "共有履歴を確認できない",
+      "changes": {},
+      "seed": {
+        "known": false
+      },
+      "expected_send": "HOLD",
+      "expected_adopt": "HOLD"
+    },
+    {
+      "key": "pending",
+      "label": "前回の送信結果が未確定",
+      "changes": {},
+      "seed": {
+        "pending": true
+      },
+      "expected_send": "HOLD",
+      "expected_adopt": "HOLD"
+    },
+    {
+      "key": "duplicate",
+      "label": "同じ要求IDの再実行",
+      "changes": {
+        "request_id": "REQ-USED"
+      },
+      "seed": {
+        "used_ids": [
+          "REQ-USED"
+        ]
+      },
+      "expected_send": "REJECT",
+      "expected_adopt": "HOLD"
+    },
+    {
+      "key": "budget_exact",
+      "label": "累積点数が上限ちょうど",
+      "changes": {
+        "fields": [
+          "topic",
+          "area"
+        ]
+      },
+      "seed": {
+        "disclosed": [
+          "age_band"
+        ]
+      },
+      "expected_send": "PASS",
+      "expected_adopt": "PASS"
+    },
+    {
+      "key": "budget_over",
+      "label": "単独なら許可できるが累積で上限超過",
+      "changes": {
+        "fields": [
+          "topic",
+          "area"
+        ]
+      },
+      "seed": {
+        "disclosed": [
+          "age_band",
+          "household_band"
+        ]
+      },
+      "expected_send": "REJECT",
+      "expected_adopt": "HOLD"
+    },
+    {
+      "key": "same_fields",
+      "label": "同じ固定項目の再利用は新規開示ゼロ",
+      "changes": {},
+      "seed": {
+        "disclosed": [
+          "topic",
+          "age_band",
+          "household_band"
+        ]
+      },
+      "expected_send": "PASS",
+      "expected_adopt": "PASS"
+    },
+    {
+      "key": "all_fields",
+      "label": "全項目の要求で上限超過",
+      "changes": {
+        "fields": [
+          "topic",
+          "age_band",
+          "household_band",
+          "area",
+          "income_band"
+        ]
+      },
+      "seed": {},
+      "expected_send": "REJECT",
+      "expected_adopt": "HOLD"
+    },
+    {
+      "key": "output_name",
+      "label": "AI役の応答文に氏名が再混入",
+      "changes": {
+        "response": "leak_name"
+      },
+      "seed": {},
+      "expected_send": "PASS",
+      "expected_adopt": "REJECT"
+    },
+    {
+      "key": "output_field",
+      "label": "出力に余分な項目がある",
+      "changes": {
+        "response": "extra_field"
+      },
+      "seed": {},
+      "expected_send": "PASS",
+      "expected_adopt": "REJECT"
+    },
+    {
+      "key": "output_no_binding",
+      "label": "出力の要求参照がない",
+      "changes": {
+        "response": "missing_binding"
+      },
+      "seed": {},
+      "expected_send": "PASS",
+      "expected_adopt": "HOLD"
+    },
+    {
+      "key": "output_wrong_binding",
+      "label": "別の要求に対応する出力",
+      "changes": {
+        "response": "wrong_binding"
+      },
+      "seed": {},
+      "expected_send": "PASS",
+      "expected_adopt": "REJECT"
+    },
+    {
+      "key": "output_wrong_use",
+      "label": "出力が自動決定用を要求",
+      "changes": {
+        "response": "unsafe_use"
+      },
+      "seed": {},
+      "expected_send": "PASS",
+      "expected_adopt": "REJECT"
+    },
+    {
+      "key": "output_text",
+      "label": "出力に無検証の文章を追記",
+      "changes": {
+        "response": "changed_text"
+      },
+      "seed": {},
+      "expected_send": "PASS",
+      "expected_adopt": "REJECT"
+    },
+    {
+      "key": "unknown_outcome",
+      "label": "送信後に応答確認ができない",
+      "changes": {
+        "outcome": "unknown"
+      },
+      "seed": {},
+      "expected_send": "PASS",
+      "expected_adopt": "HOLD"
+    },
+    {
+      "key": "reject_priority",
+      "label": "根拠不足と禁止設定の競合",
+      "changes": {
+        "basis": "missing",
+        "training": true
+      },
+      "seed": {},
+      "expected_send": "REJECT",
+      "expected_adopt": "HOLD"
+    },
+    {
+      "key": "source_b",
+      "label": "別の合成対象の独立セッション",
+      "changes": {
+        "source_id": "SYN-B"
+      },
+      "seed": {
+        "scope": "SYN-B"
+      },
+      "expected_send": "PASS",
+      "expected_adopt": "PASS"
+    },
+    {
+      "key": "source_c",
+      "label": "20代・4人世帯の変換",
+      "changes": {
+        "source_id": "SYN-C"
+      },
+      "seed": {
+        "scope": "SYN-C"
+      },
+      "expected_send": "PASS",
+      "expected_adopt": "PASS"
+    },
+    {
+      "key": "prior_over_limit",
+      "label": "初期履歴が既に上限超過",
+      "changes": {
+        "fields": [
+          "topic"
+        ]
+      },
+      "seed": {
+        "disclosed": [
+          "area",
+          "income_band"
+        ]
+      },
+      "expected_send": "REJECT",
+      "expected_adopt": "HOLD"
+    },
+    {
+      "key": "topic_only",
+      "label": "相談分野だけでも下書きは作れる",
+      "changes": {
+        "fields": [
+          "topic"
+        ]
+      },
+      "seed": {},
+      "expected_send": "PASS",
+      "expected_adopt": "PASS"
+    },
+    {
+      "key": "forbidden_with_missing",
+      "label": "禁止項目は証拠不足より優先",
+      "changes": {
+        "fields": [
+          "resident_name"
+        ],
+        "evidence": false
+      },
+      "seed": {},
+      "expected_send": "REJECT",
+      "expected_adopt": "HOLD"
+    },
+    {
+      "key": "pending_duplicate",
+      "label": "未確定かつ要求ID重複",
+      "changes": {
+        "request_id": "REQ-USED"
+      },
+      "seed": {
+        "pending": true,
+        "used_ids": [
+          "REQ-USED"
+        ]
+      },
+      "expected_send": "REJECT",
+      "expected_adopt": "HOLD"
+    }
+  ],
+  "scenarios": [
+    {
+      "key": "normal",
+      "title": "必要項目だけで使う",
+      "caption": "氏名・詳細住所を渡さず、案内の下書きを得る。",
+      "steps": [
+        {
+          "test": "normal"
+        }
+      ]
+    },
+    {
+      "key": "basis",
+      "title": "根拠を補って進める",
+      "caption": "未確認なら止める。確認記録を補った別の要求で再判定。",
+      "steps": [
+        {
+          "test": "basis_missing"
+        },
+        {
+          "test": "normal"
+        }
+      ]
+    },
+    {
+      "key": "minimise",
+      "title": "氏名を外して進める",
+      "caption": "氏名が残る要求は拒否。必要な項目に絞ると利用可能。",
+      "steps": [
+        {
+          "test": "name_in_payload"
+        },
+        {
+          "test": "normal"
+        }
+      ]
+    },
+    {
+      "key": "recipient",
+      "title": "送信先で止める",
+      "caption": "同じ情報でも、許可外の送信先には渡さない。",
+      "steps": [
+        {
+          "test": "wrong_recipient"
+        }
+      ]
+    },
+    {
+      "key": "output",
+      "title": "出力の再混入を止める",
+      "caption": "送信が許可されても、応答文に氏名が混入すれば採用しない。",
+      "steps": [
+        {
+          "test": "output_name"
+        }
+      ]
+    },
+    {
+      "key": "unknown",
+      "title": "結果不明を保持する",
+      "caption": "届いたか確定できない情報は返却扱いにしない。後続処理も保留。",
+      "steps": [
+        {
+          "test": "unknown_outcome"
+        },
+        {
+          "test": "normal",
+          "expected_send": "HOLD",
+          "expected_adopt": "HOLD"
+        }
+      ]
+    },
+    {
+      "key": "cumulative",
+      "title": "累積開示を追う",
+      "caption": "1回ずつなら許容される項目も、組み合わせが上限を超えれば止める。",
+      "steps": [
+        {
+          "test": "normal",
+          "changes": {
+            "fields": [
+              "topic",
+              "age_band"
+            ]
+          }
+        },
+        {
+          "test": "normal",
+          "changes": {
+            "fields": [
+              "topic",
+              "household_band"
+            ]
+          }
+        },
+        {
+          "test": "normal",
+          "changes": {
+            "fields": [
+              "topic",
+              "area"
+            ]
+          },
+          "expected_send": "REJECT",
+          "expected_adopt": "HOLD"
+        },
+        {
+          "test": "normal",
+          "changes": {
+            "fields": [
+              "topic",
+              "age_band"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
