@@ -1,0 +1,127 @@
+{
+  "schema": "gennai-civic-bridge-delivery-verification/1.0",
+  "date": "2026-10-24",
+  "version": "1.0.0",
+  "report_type": "local-self-report; not an external certificate",
+  "source_binding": {
+    "version": "1.0.0",
+    "profile_sha256": "5141f37617b0c068f9f165883d05cd717f6292296e3701c52906db08f0ff5bf7",
+    "integration_files": {
+      "poc.py": "bd7a8aa0f61897b72493cdcf4872b0fe582e79350c45b294895513e3f7e6244a",
+      "cases.json": "643136512d16b3e330c961f0c6c7e4f8da4aa532d2e8bf4df2986714575a44c9",
+      "CivicBridge.lean": "c4811c21fbe124f73d180e9560140b9a67cab436fc9cb2c3ab913d6a287806ab",
+      "lean-toolchain": "55e97be96000b5e9e290c9e74482e5e317861499a5540353ce845471bded8cea",
+      "lakefile.toml": "f5b22f2564799778bdb26c177bdcc6b8d4dff62221dc351df56b3a854c2403cc"
+    },
+    "integration_text_normalization": "CRLF-to-LF-only",
+    "upstream_archive_sha256": "47e9adb6056307badfbe8ac51093eacd458472c6f44674fef2c9a213acc48f0f",
+    "sources": {
+      "answer": {
+        "repository": "GhostDriftTheory/civic-ai-answer-adoption-assurance",
+        "commit": "e7e226c279f4f40752ab6cff1ad2fb41f94212ca"
+      },
+      "privacy": {
+        "repository": "GhostDriftTheory/civic-ai-privacy-assurance",
+        "commit": "622e8f8de886a9f9394289ac47ae2160efd4722d"
+      },
+      "lifecycle": {
+        "repository": "GhostDriftTheory/civic-ai-lifecycle-assurance",
+        "commit": "a410d4171734a56a789d3d0742a9db17d17b7e3d"
+      },
+      "gennai": {
+        "repository": "digital-go-jp/genai-web",
+        "commit": "a19adaa3d1291ac94291a76e341c326ab20413a0",
+        "path": "docs/AIアプリAPI仕様.md",
+        "mode": "synchronous inputs/outputs only"
+      }
+    }
+  },
+  "environment": {
+    "python": "3.13.5",
+    "os": "Linux",
+    "node": "v22.16.0",
+    "playwright": "1.57.0"
+  },
+  "command": "python poc.py ci --runtime-only --snapshot-only",
+  "results": {
+    "python": {
+      "schema": "gennai-civic-bridge-tests/1.0",
+      "total": 1086,
+      "passed": 1086,
+      "upstream": {
+        "answer": {
+          "total": 122,
+          "passed": 122
+        },
+        "privacy": {
+          "total": 239,
+          "passed": 239
+        },
+        "lifecycle": {
+          "total": 249,
+          "passed": 249
+        }
+      },
+      "composition_inputs": 8192,
+      "failures": []
+    },
+    "http": {
+      "total": 48,
+      "passed": 48,
+      "failures": [],
+      "scope": "real localhost HTTP, synthetic generator; no deployed Gennai OSS environment"
+    },
+    "javascript": {
+      "inputs": 8223,
+      "matched": 8223,
+      "scope": "composition model; not complete independent execution of all three upstream engines"
+    },
+    "browser": {
+      "checks": 35,
+      "passed": 35,
+      "script_errors": [],
+      "mode": "snapshot-only",
+      "live_bridge_ui_checked": false,
+      "scope": "our bridge display; not official Gennai OSS UI"
+    },
+    "replayed_records": 31,
+    "gennai_oss_environment_tested": false,
+    "external_ai_calls": 0,
+    "runtime_ok": true,
+    "lean_checked": false,
+    "validation_scope": "runtime-only; formal checks not executed"
+  },
+  "unexecuted": [
+    "Lean proof checking/build",
+    "Live browser-to-Python UI integration",
+    "Deployed Gennai OSS environment connection",
+    "New real AI API calls"
+  ],
+  "formal_configuration": {
+    "toolchain": "leanprover/lean4:v4.19.0",
+    "named_integration_theorems": 18,
+    "strict_ci_command": "python poc.py ci",
+    "missing_lean_command_exit": 2
+  },
+  "original_sources_changed": false,
+  "original_api_evidence_changed": false,
+  "remote_repository_written": false,
+  "additional_validation": {
+    "fresh_extraction": true,
+    "single_case_report": true,
+    "CRLF_source_replay": true,
+    "actual_Windows_OS_test": false
+  },
+  "fresh_extraction_runtime_report_matches": true,
+  "artifacts_sha256": {
+    "poc.py": "bd7a8aa0f61897b72493cdcf4872b0fe582e79350c45b294895513e3f7e6244a",
+    "cases.json": "643136512d16b3e330c961f0c6c7e4f8da4aa532d2e8bf4df2986714575a44c9",
+    "upstream.zip": "47e9adb6056307badfbe8ac51093eacd458472c6f44674fef2c9a213acc48f0f",
+    "demo.html": "afd25d34c222ced80d8964f46253fb435a55f091ae5b67702d08d0859ed3def0",
+    "evidence.json": "6f6b972eeac660dfdb16555bf0ebaca6b4d2399faa68d3eac1bfb87d22cb6bc5",
+    "CivicBridge.lean": "c4811c21fbe124f73d180e9560140b9a67cab436fc9cb2c3ab913d6a287806ab",
+    "lean-toolchain": "55e97be96000b5e9e290c9e74482e5e317861499a5540353ce845471bded8cea",
+    "lakefile.toml": "f5b22f2564799778bdb26c177bdcc6b8d4dff62221dc351df56b3a854c2403cc",
+    ".github/workflows/verify.yml": "3134702c066afbc070928b0fb49a8e393d197ac70902ddf9c73c94de9ed9b43f"
+  }
+}

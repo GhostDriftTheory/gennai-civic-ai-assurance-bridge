@@ -1,0 +1,445 @@
+{
+  "schema": "gennai-civic-bridge-cases/1.0",
+  "profile": {
+    "id": "SYN-CIVIC-SUBSIDY-BRIDGE-1",
+    "version": "1.0",
+    "synthetic_only": true,
+    "purpose": "subsidy_guidance",
+    "recipient": "LOCAL-SYNTHETIC-GENERATOR",
+    "role": "staff",
+    "use": "staff_draft",
+    "fields": {
+      "establishment": 0,
+      "employees": 1,
+      "tax_arrears": 2,
+      "duplicate": 1
+    },
+    "budget": 4,
+    "private": {
+      "resident_name": "架空相談者A",
+      "street_address": "架空市・非送信住所A"
+    },
+    "privacy_gate_names": [
+      "対象データと共有範囲",
+      "利用目的・用途・職員確認",
+      "利用根拠と模擬権限",
+      "送信先・取扱条件",
+      "送信項目の限定",
+      "元情報と実送信内容の一致",
+      "累積開示の上限",
+      "未確定状態・重複要求"
+    ],
+    "output_gate_names": [
+      "要求と応答の対応",
+      "応答構造の範囲",
+      "合成非公開項目の混入検査",
+      "職員確認用への用途限定"
+    ],
+    "scope": "管理ゲート経由の合成データ利用。実行政決定・法令適合認証・管理外の消去は対象外。"
+  },
+  "sources": {
+    "answer": {
+      "repository": "GhostDriftTheory/civic-ai-answer-adoption-assurance",
+      "commit": "e7e226c279f4f40752ab6cff1ad2fb41f94212ca"
+    },
+    "privacy": {
+      "repository": "GhostDriftTheory/civic-ai-privacy-assurance",
+      "commit": "622e8f8de886a9f9394289ac47ae2160efd4722d"
+    },
+    "lifecycle": {
+      "repository": "GhostDriftTheory/civic-ai-lifecycle-assurance",
+      "commit": "a410d4171734a56a789d3d0742a9db17d17b7e3d"
+    },
+    "gennai": {
+      "repository": "digital-go-jp/genai-web",
+      "commit": "a19adaa3d1291ac94291a76e341c326ab20413a0",
+      "path": "docs/AIアプリAPI仕様.md",
+      "mode": "synchronous inputs/outputs only"
+    }
+  },
+  "archive_sha256": "47e9adb6056307badfbe8ac51093eacd458472c6f44674fef2c9a213acc48f0f",
+  "upstream_files": {
+    "answer/poc.py": {
+      "sha256": "e7b28e14ba2e5c2b09fa7e4878a4db230a9fe5789a17d3563f18a618c50625ff",
+      "git_blob": "6333f6efe3d3268d3a20821d2edaee85f184bd5a",
+      "size": 66335
+    },
+    "answer/cases.json": {
+      "sha256": "8285e574a7c7f671f29b4c1246d722fd6d5c237476bc2987f4b806548e873973",
+      "git_blob": "c14e081b4f191db8986fdd95853be4fc24434f55",
+      "size": 24287
+    },
+    "answer/CivicAnswerAdoption.lean": {
+      "sha256": "73e438778bcc8d48b825ee1a8f8bbb518d4e43846c479bd9a705b2d71a29107e",
+      "git_blob": "71471cd6a207886c87049d324099be80885a04b6",
+      "size": 22879
+    },
+    "privacy/poc.py": {
+      "sha256": "c824f71da9889d6b735281081a59414a9f8b10811d9c96234d321296304be716",
+      "git_blob": "8838510d244f3051b5155efd2c99c8d26bff8ff7",
+      "size": 51166
+    },
+    "privacy/cases.json": {
+      "sha256": "bc131f6da22f6737290d14d715e44051198a36140ef4d278750f38de110674d1",
+      "git_blob": "0964ab2493c7251a5fea117058fe6fdf4307cb5c",
+      "size": 18135
+    },
+    "privacy/CivicPrivacyAssurance.lean": {
+      "sha256": "430aba913df66390e3b258f52da4415b949885b74e8170e65b87c4b6ca8f930d",
+      "git_blob": "26bfb85f563a5fcffa4e2c693174816fa50c0ea8",
+      "size": 15299
+    },
+    "lifecycle/poc.py": {
+      "sha256": "4c6730a3e274a839a173df0e130723ff88bdb5c98e6d25cd16c8e60b1e7a1300",
+      "git_blob": "5112f70f21c688d0cbaa6a31cd5ed9714ac6efd8",
+      "size": 93469
+    },
+    "lifecycle/cases.json": {
+      "sha256": "fe59c2e0ab0206f8272e4983d2a7c4cb8fc5957da5bf429af8d3b3b857e6fce1",
+      "git_blob": "3a1c5d15dcc96cf0215cdde265a20fd4686fa469",
+      "size": 20504
+    },
+    "lifecycle/CivicLifecycleAssurance.lean": {
+      "sha256": "4264bb41055a731e0082ae3032ada05ffcb6c5df893f84350766fa4fdd986159",
+      "git_blob": "8888b758ac08e7be5b4d3c5ce9ad616598ef3b74",
+      "size": 19092
+    }
+  },
+  "scenarios": [
+    {
+      "key": "normal",
+      "label": "必要項目だけで回答案を使う",
+      "expected": "PASS",
+      "privacy": {},
+      "answer": "normal",
+      "lifecycle": "read",
+      "applicant": {},
+      "note": "氏名・住所を渡さず、同一の回答を3段階で確認します。"
+    },
+    {
+      "key": "missing_basis",
+      "label": "利用根拠が足りない",
+      "expected": "HOLD",
+      "privacy": {
+        "basis": "missing"
+      },
+      "answer": "normal",
+      "lifecycle": "read",
+      "applicant": {},
+      "note": ""
+    },
+    {
+      "key": "denied_basis",
+      "label": "許可されていない利用",
+      "expected": "REJECT",
+      "privacy": {
+        "basis": "denied"
+      },
+      "answer": "normal",
+      "lifecycle": "read",
+      "applicant": {},
+      "note": ""
+    },
+    {
+      "key": "wrong_destination",
+      "label": "許可外の送信先",
+      "expected": "REJECT",
+      "privacy": {
+        "recipient": "UNAPPROVED"
+      },
+      "answer": "normal",
+      "lifecycle": "read",
+      "applicant": {},
+      "note": ""
+    },
+    {
+      "key": "private_input",
+      "label": "氏名を含む送信を止める",
+      "expected": "REJECT",
+      "privacy": {
+        "add_private": true
+      },
+      "answer": "normal",
+      "lifecycle": "read",
+      "applicant": {},
+      "note": ""
+    },
+    {
+      "key": "changed_wire",
+      "label": "判定前に入力がすり替わる",
+      "expected": "REJECT",
+      "privacy": {
+        "patch_wire": true
+      },
+      "answer": "normal",
+      "lifecycle": "read",
+      "applicant": {},
+      "note": ""
+    },
+    {
+      "key": "unknown_history",
+      "label": "開示履歴が不明",
+      "expected": "HOLD",
+      "privacy": {
+        "history_known": false
+      },
+      "answer": "normal",
+      "lifecycle": "read",
+      "applicant": {},
+      "note": ""
+    },
+    {
+      "key": "budget_exceeded",
+      "label": "開示上限を超える",
+      "expected": "REJECT",
+      "privacy": {
+        "limit": 3
+      },
+      "answer": "normal",
+      "lifecycle": "read",
+      "applicant": {},
+      "note": ""
+    },
+    {
+      "key": "unknown_delivery",
+      "label": "送信結果が不明",
+      "expected": "HOLD",
+      "privacy": {
+        "delivery": "unknown"
+      },
+      "answer": "normal",
+      "lifecycle": "read",
+      "applicant": {},
+      "note": "消費を戻さず未確定として保持。自動再送はしません。"
+    },
+    {
+      "key": "duplicate",
+      "label": "同じ要求の二重実行",
+      "expected": "REJECT",
+      "privacy": {
+        "duplicate": true
+      },
+      "answer": "normal",
+      "lifecycle": "read",
+      "applicant": {},
+      "note": ""
+    },
+    {
+      "key": "missing_conditions",
+      "label": "相談条件の不足",
+      "expected": "HOLD",
+      "privacy": {},
+      "answer": "normal",
+      "lifecycle": "read",
+      "applicant": {
+        "tax_arrears": null
+      },
+      "note": ""
+    },
+    {
+      "key": "out_of_scope",
+      "label": "対象外という正しい案内",
+      "expected": "PASS",
+      "privacy": {},
+      "answer": "normal",
+      "lifecycle": "read",
+      "applicant": {
+        "employees": 30
+      },
+      "note": ""
+    },
+    {
+      "key": "wrong_city",
+      "label": "別の自治体の回答",
+      "expected": "REJECT",
+      "privacy": {},
+      "answer": "wrong_city",
+      "lifecycle": "read",
+      "applicant": {},
+      "note": ""
+    },
+    {
+      "key": "wrong_amount",
+      "label": "根拠と異なる補助額",
+      "expected": "REJECT",
+      "privacy": {},
+      "answer": "wrong_amount",
+      "lifecycle": "read",
+      "applicant": {},
+      "note": ""
+    },
+    {
+      "key": "stale_source",
+      "label": "古い資料を混ぜる",
+      "expected": "REJECT",
+      "privacy": {},
+      "answer": "stale_source",
+      "lifecycle": "read",
+      "applicant": {},
+      "note": ""
+    },
+    {
+      "key": "missing_citation",
+      "label": "主張の根拠が不足",
+      "expected": "HOLD",
+      "privacy": {},
+      "answer": "missing_citation",
+      "lifecycle": "read",
+      "applicant": {},
+      "note": ""
+    },
+    {
+      "key": "unexpected_prose",
+      "label": "未定義の文章を追加",
+      "expected": "REJECT",
+      "privacy": {},
+      "answer": "unexpected_prose",
+      "lifecycle": "read",
+      "applicant": {},
+      "note": ""
+    },
+    {
+      "key": "private_output",
+      "label": "回答への氏名再混入",
+      "expected": "REJECT",
+      "privacy": {},
+      "answer": "private_output",
+      "lifecycle": "read",
+      "applicant": {},
+      "note": ""
+    },
+    {
+      "key": "wrong_binding",
+      "label": "別の要求に対する応答",
+      "expected": "REJECT",
+      "privacy": {},
+      "answer": "wrong_binding",
+      "lifecycle": "read",
+      "applicant": {},
+      "note": ""
+    },
+    {
+      "key": "missing_binding",
+      "label": "応答の対応が未確認",
+      "expected": "HOLD",
+      "privacy": {},
+      "answer": "missing_binding",
+      "lifecycle": "read",
+      "applicant": {},
+      "note": ""
+    },
+    {
+      "key": "postcheck_tamper",
+      "label": "検証後に回答を書き換える",
+      "expected": "REJECT",
+      "privacy": {},
+      "answer": "postcheck_tamper",
+      "lifecycle": "read",
+      "applicant": {},
+      "note": ""
+    },
+    {
+      "key": "secondary_denied",
+      "label": "未承認の二次利用",
+      "expected": "REJECT",
+      "privacy": {},
+      "answer": "normal",
+      "lifecycle": "secondary",
+      "applicant": {},
+      "note": ""
+    },
+    {
+      "key": "model_relaxes",
+      "label": "AIの自己申告で条件を外さない",
+      "expected": "REJECT",
+      "privacy": {},
+      "answer": "model_relaxes",
+      "lifecycle": "secondary",
+      "applicant": {},
+      "note": ""
+    },
+    {
+      "key": "approved_secondary",
+      "label": "模擬承認した用途だけ追加",
+      "expected": "PASS",
+      "privacy": {},
+      "answer": "normal",
+      "lifecycle": "approve_secondary",
+      "applicant": {},
+      "note": ""
+    },
+    {
+      "key": "external_use",
+      "label": "内部限定の回答を外部へ出さない",
+      "expected": "REJECT",
+      "privacy": {},
+      "answer": "normal",
+      "lifecycle": "external",
+      "applicant": {},
+      "note": ""
+    },
+    {
+      "key": "expired",
+      "label": "期限を過ぎた利用",
+      "expected": "REJECT",
+      "privacy": {},
+      "answer": "normal",
+      "lifecycle": "expired",
+      "applicant": {},
+      "note": ""
+    },
+    {
+      "key": "unknown_path",
+      "label": "利用経路の状態が不明",
+      "expected": "HOLD",
+      "privacy": {},
+      "answer": "normal",
+      "lifecycle": "unknown_path",
+      "applicant": {},
+      "note": ""
+    },
+    {
+      "key": "copy_left",
+      "label": "コピーが残るため終了不成立",
+      "expected": "REJECT",
+      "privacy": {},
+      "answer": "normal",
+      "lifecycle": "copy_left",
+      "applicant": {},
+      "note": ""
+    },
+    {
+      "key": "closed",
+      "label": "管理範囲の利用終了を確認",
+      "expected": "PASS",
+      "privacy": {},
+      "answer": "normal",
+      "lifecycle": "closed",
+      "applicant": {},
+      "note": "PASSは利用終了判定。回答の再利用を許可するものではありません。"
+    },
+    {
+      "key": "stale_certificate",
+      "label": "経路復元後に旧証明を拒否",
+      "expected": "REJECT",
+      "privacy": {},
+      "answer": "normal",
+      "lifecycle": "stale_certificate",
+      "applicant": {},
+      "note": ""
+    },
+    {
+      "key": "unknown_after_retry",
+      "label": "結果不明の後続送信を保留",
+      "expected": "HOLD",
+      "privacy": {
+        "delivery": "unknown",
+        "duplicate": true
+      },
+      "answer": "normal",
+      "lifecycle": "read",
+      "applicant": {},
+      "note": ""
+    }
+  ]
+}
