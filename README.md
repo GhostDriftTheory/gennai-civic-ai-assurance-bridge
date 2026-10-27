@@ -1,5 +1,7 @@
 # 自治体AIアシュアランス統合PoC ― 源内公開API形式対応
 
+[![CI検証](https://github.com/GhostDriftTheory/gennai-civic-ai-assurance-bridge/actions/workflows/verify.yml/badge.svg?branch=main)](https://github.com/GhostDriftTheory/gennai-civic-ai-assurance-bridge/actions/workflows/verify.yml)
+
 **同じ案件・同じ回答について、送信前、回答採用、生成後の利用を一続きで検査する。条件が揃わない処理は進めず、理由と記録を再検証する。**
 
 株式会社AIアシュアランスによる、固定合成データ専用の公開参照実装です。既存の自治体AIアシュアランス3件の公開コードを変更せず、新しい共通プロファイルと接続処理を追加しています。
