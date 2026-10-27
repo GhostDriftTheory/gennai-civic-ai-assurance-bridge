@@ -13,3 +13,12 @@ verification.log
 .DS_Store
 Thumbs.db
 .vscode/
+
+# Private API experiment records stay outside this repository.
+# The root evidence.json is the public 31-case synthetic record and stays tracked.
+private/
+nonpublic/
+AI_Assurance_Experiments/
+openai_live*_evidence.json
+openai_live*_report.html
+gennai_bridge_PRIVATE_RECORDS*.zip

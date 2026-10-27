@@ -1,9 +1,8 @@
 {
-  "schema": "gennai-civic-bridge-delivery-verification/1.1",
-  "date": "2026-10-24",
+  "schema": "gennai-civic-bridge-delivery-verification/1.2",
+  "date": "2026-10-26",
   "version": "1.0.1",
-  "report_type": "local-self-report; not an external certificate",
-  "delivery_layout": "directory-ready, no zip required or included",
+  "report_type": "local-self-report with separately identified prior GitHub Actions result; not an external certificate",
   "source_binding": {
     "version": "1.0.1",
     "profile_sha256": "51c5598cfce00bee6fc9742259382f6173ddb5d17eec0690582b04dca55bcedd",
@@ -91,21 +90,95 @@
     "lean_checked": false,
     "validation_scope": "runtime-only; formal checks not executed"
   },
-  "unexecuted": [
-    "Lean proof checking/build",
-    "Live browser-to-Python UI integration (browser local URL access denied)",
+  "unexecuted_in_this_local_recheck": [
+    "Lean proof checking/build: Lean/Lake is not installed in this local environment",
+    "Live browser-to-Python UI integration: localhost navigation was attempted but blocked by the browser environment (ERR_BLOCKED_BY_ADMINISTRATOR)",
+    "New real AI API calls",
     "Deployed Gennai OSS environment connection",
-    "New real AI API calls"
+    "New GitHub Actions run for the delivered documentation and aggregate files"
   ],
-  "formal_configuration": {
-    "toolchain": "leanprover/lean4:v4.19.0",
-    "named_integration_theorems": 18,
-    "strict_ci_command": "python poc.py ci",
-    "lean_checked_locally": false
+  "prior_github_actions": {
+    "repository": "GhostDriftTheory/gennai-civic-ai-assurance-bridge",
+    "commit": "d3563fd31cdf21312f25666f5429ea41ca93c12f",
+    "run_id": 40262016151,
+    "job_id": 121376219935,
+    "url": "https://github.com/GhostDriftTheory/gennai-civic-ai-assurance-bridge/actions/runs/40262016151",
+    "conclusion": "success",
+    "command": "python poc.py ci",
+    "completed_at_utc": "2026-10-26T03:03:38Z",
+    "formal": {
+      "lean_checked": true,
+      "version": "4.19.0",
+      "integration_theorems": 18,
+      "concrete_inputs": 8223,
+      "upstream_models": "built unchanged",
+      "axiom_audit": "passed"
+    },
+    "browser": {
+      "checks": 35,
+      "passed": 35,
+      "mode": "live-local-and-snapshot",
+      "live_bridge_ui_checked": true
+    },
+    "scope": "Historical full CI for this exact core code, source locks, models, demo, workflow and synthetic evidence; not a new CI run for this delivery"
   },
-  "original_sources_changed": false,
-  "original_api_evidence_changed": false,
-  "remote_repository_written": false,
+  "synthetic_evidence": {
+    "path": "evidence.json",
+    "schema": "gennai-civic-bridge-evidence/1.0",
+    "records": 31,
+    "origin_commit": "d3563fd31cdf21312f25666f5429ea41ca93c12f",
+    "git_blob": "9d0b6f41653dd466f315b7abd6fa701f649d8b5d",
+    "byte_exact_original": true,
+    "replayed": 31,
+    "regenerated": false
+  },
+  "api_experiment": {
+    "experiment_version": "1.1.0",
+    "saved_evidence_replay": {
+      "evidence_valid": true,
+      "records": 24,
+      "execution_complete": true,
+      "criteria_met": true,
+      "fixture_only": false,
+      "network_calls_during_verification": 0,
+      "provider_authentication": false
+    },
+    "offline_code_tests": {
+      "schema": "civic-api-v110-offline-tests/1.0",
+      "version": "1.1.0",
+      "total": 699,
+      "passed": 699,
+      "failures": [],
+      "existing_experiment_tests": 407,
+      "additional_design_tests": 292,
+      "upstream": {
+        "answer": {
+          "total": 122,
+          "passed": 122
+        },
+        "privacy": {
+          "total": 239,
+          "passed": 239
+        },
+        "lifecycle": {
+          "total": 249,
+          "passed": 249
+        }
+      },
+      "external_api_calls": 0,
+      "real_provider_tested": false,
+      "original_poc_changed": false,
+      "new_lean_proof": false
+    },
+    "original_record_bytes_changed": false,
+    "original_experiment_code_changed": false,
+    "live_api_rerun": false,
+    "private_detail_records_in_public_delivery": false,
+    "public_summary_path": "summary.json",
+    "public_summary_exporter": "openai_bridge_eval.py summary",
+    "aggregate_independently_replayable": false,
+    "public_summary_matches_exporter_output": true
+  },
   "direct_folder_integrity_check": {
     "answer/poc.py": {
       "sha256": "e7b28e14ba2e5c2b09fa7e4878a4db230a9fe5789a17d3563f18a618c50625ff",
@@ -144,30 +217,64 @@
       "size": 19092
     }
   },
+  "unchanged_runtime_and_test_files_git_blob": {
+    ".github/workflows/verify.yml": "3019cc6abbfe23c4ea42fc86c932dcdb3cf753b9",
+    "CivicBridge.lean": "f79919bc64915834e12b55a1883f3dc6dabd8ac4",
+    "answer/CivicAnswerAdoption.lean": "71471cd6a207886c87049d324099be80885a04b6",
+    "answer/cases.json": "c14e081b4f191db8986fdd95853be4fc24434f55",
+    "answer/poc.py": "6333f6efe3d3268d3a20821d2edaee85f184bd5a",
+    "cases.json": "d9c216c1cfe3bca6b066fa4b61e3f101f849fa2f",
+    "demo.html": "c584d02c6f44c4db8330e28491c11b456eb48d98",
+    "lakefile.toml": "649cf993cf0cf9738f4c4c2ae0d2654a88a452cf",
+    "lean-toolchain": "7aca1d8a939cc24c413eddd793671cdce7070b74",
+    "lifecycle/CivicLifecycleAssurance.lean": "8888b758ac08e7be5b4d3c5ce9ad616598ef3b74",
+    "lifecycle/cases.json": "3a1c5d15dcc96cf0215cdde265a20fd4686fa469",
+    "lifecycle/poc.py": "5112f70f21c688d0cbaa6a31cd5ed9714ac6efd8",
+    "openai_bridge_eval.py": "215d66b4a6a72ffd61a0f1e0924fa92a9be432e5",
+    "poc.py": "b00b75a182deb0032114e2400bb30db33f58b3ea",
+    "privacy/CivicPrivacyAssurance.lean": "26bfb85f563a5fcffa4e2c693174816fa50c0ea8",
+    "privacy/cases.json": "0964ab2493c7251a5fea117058fe6fdf4307cb5c",
+    "privacy/poc.py": "8838510d244f3051b5155efd2c99c8d26bff8ff7"
+  },
   "artifacts_sha256": {
-    "poc.py": "7ac9fbd85b57e2bf120753a30ab292e893ad52dcfd00045e3dadffe3b1a0998f",
-    "cases.json": "27fc29c9463c904584854808d95310ecb49d8b8e83244ae5352286f40742e9f7",
-    "README.md": "6c9bcafc6c8443a94f610148d23e07d7f4d0ccb8008e4bd0c4b417e50329cb54",
-    "demo.html": "c88d476fe8bbdb8b2b5f7bf5b8001bebdf5460a85434fb706fe90017845df012",
-    "evidence.json": "11e4ad98b9d0d1e8fe19ae4eb02482d05b397984f261f7fa9c9006d4e3e2970a",
+    ".github/workflows/verify.yml": "07d33aed7d971c82b968a2d77c1ef8f45b8ec32df4c4b4945df58b4e30119817",
+    ".gitignore": "5ca6f3eff079441f7633215d5e48997ca7acf0543614591a6b0b39f28a87c76b",
     "CivicBridge.lean": "c4811c21fbe124f73d180e9560140b9a67cab436fc9cb2c3ab913d6a287806ab",
-    "lean-toolchain": "55e97be96000b5e9e290c9e74482e5e317861499a5540353ce845471bded8cea",
-    "lakefile.toml": "f9adc3841c60526aa70506dcc63e3f837205e4c3c86cf0f67ef6468beec1a9b0",
-    ".gitignore": "b50b77acd6a8a463c56dff87fd61d9150d88cddd4c9cedae52a720ccb6261f44",
-    ".github/workflows/verify.yml": "524efb6b84661ed26ac96dca71044bf89d22f4a90e1721aa311ea37ebe64a56e",
+    "README.md": "a70dac6ee918f4c838b9c6d312c642293b946bd20c47087af9cfd55f4eb2e2b9",
     "answer/CivicAnswerAdoption.lean": "73e438778bcc8d48b825ee1a8f8bbb518d4e43846c479bd9a705b2d71a29107e",
     "answer/cases.json": "8285e574a7c7f671f29b4c1246d722fd6d5c237476bc2987f4b806548e873973",
     "answer/poc.py": "e7b28e14ba2e5c2b09fa7e4878a4db230a9fe5789a17d3563f18a618c50625ff",
+    "cases.json": "27fc29c9463c904584854808d95310ecb49d8b8e83244ae5352286f40742e9f7",
+    "demo.html": "0eec1f346f0e98776f353970f00ebda024ab2ccbea05eeb239bda0af07e7d005",
+    "evidence.json": "45142a602e708327dcde297771375b6fee3856cc8f553d6c900e2969321aea0e",
+    "lakefile.toml": "f9adc3841c60526aa70506dcc63e3f837205e4c3c86cf0f67ef6468beec1a9b0",
+    "lean-toolchain": "55e97be96000b5e9e290c9e74482e5e317861499a5540353ce845471bded8cea",
     "lifecycle/CivicLifecycleAssurance.lean": "4264bb41055a731e0082ae3032ada05ffcb6c5df893f84350766fa4fdd986159",
     "lifecycle/cases.json": "fe59c2e0ab0206f8272e4983d2a7c4cb8fc5957da5bf429af8d3b3b857e6fce1",
     "lifecycle/poc.py": "4c6730a3e274a839a173df0e130723ff88bdb5c98e6d25cd16c8e60b1e7a1300",
+    "openai_bridge_eval.py": "e928434a0752dc04b4fe8988266fe5538bcf4ac8afe60d8b708032ea6c16078b",
+    "poc.py": "b058a59d67543c3de6c4f8dcb0451f0f2746e0339d1a7a89b9da3cdd8aa8c6ab",
     "privacy/CivicPrivacyAssurance.lean": "430aba913df66390e3b258f52da4415b949885b74e8170e65b87c4b6ca8f930d",
     "privacy/cases.json": "bc131f6da22f6737290d14d715e44051198a36140ef4d278750f38de110674d1",
-    "privacy/poc.py": "c824f71da9889d6b735281081a59414a9f8b10811d9c96234d321296304be716"
+    "privacy/poc.py": "c824f71da9889d6b735281081a59414a9f8b10811d9c96234d321296304be716",
+    "summary.json": "1575e4295508a8476223d3db004bd92a61583b404389582144f0d2a873701780"
   },
-  "notes": [
-    "Root ZIP removed entirely; direct answer/, privacy/, lifecycle/ directories are mandatory.",
-    "The 31 evidence records were regenerated for this exact source revision.",
-    "Source SHA-256 guards remain active for all nine original source files."
-  ]
+  "artifact_hash_scope": "Raw file bytes; verification.json excludes itself to avoid a circular hash",
+  "delivery_changes": {
+    "replace": [
+      "README.md",
+      "evidence.json",
+      "verification.json"
+    ],
+    "add": [
+      "summary.json",
+      ".gitignore"
+    ],
+    "python_code_changed": false,
+    "lean_code_changed": false,
+    "workflow_changed": false,
+    "upstream_sources_changed": false,
+    "remote_repository_written": false,
+    "git_history_rewritten": false
+  }
 }
